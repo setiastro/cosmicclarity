@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xri version="1.0">
+   <description>
+      <p>
+      This is the repository for PixInsight scripts by setiastro.com, Cosmic Clarity and others.
+    </p>
+   </description>
+   <platform os="all" arch="noarch" version="1.8.8:1.9.9">
+      <package fileName="SetiAstroCosmicClarity09.24.2024.zip" sha1="724a542c0498a3b14aed108f33c1f8d7d8de496e" type="script" releaseDate="20240924">
+         <title>
+        Cosmic Clarity V1.0
+      </title>
+         <description>
+            <p>
+Script to integrate my Cosmic Clarity AI sharpening programe within PixInsight.
+		</p>
+         </description>
+      </package>
+   </platform>
+</xri>
+<Signature developerId="FranklinMarek" timestamp="2024-09-24T14:47:47.280Z" encoding="Base64">va3OZqLclH2QaErOHd7gnG/WvbJv3SI0EdzEv4h+7YMBArXTA/tH2dRddJg56OLFUVHKS9igJhIsA34p/+XqDw==</Signature>
