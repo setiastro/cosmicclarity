@@ -14,27 +14,37 @@ import time  # For simulating progress updates
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
 
-# CNN model for sharpening
+# Define the SharpeningCNN model with adjusted convolutional layers
 class SharpeningCNN(nn.Module):
     def __init__(self):
         super(SharpeningCNN, self).__init__()
         
+        # Encoder (down-sampling path)
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 3rd layer (32 -> 64 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 5th layer (128 -> 256 feature maps)
             nn.ReLU()
         )
         
+        # Decoder (up-sampling path)
         self.decoder = nn.Sequential(
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 1st deconvolutional layer (256 -> 128 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 2nd deconvolutional layer (128 -> 64 feature maps)
             nn.ReLU(),
-            nn.Conv2d(64, 3, kernel_size=3, padding=1),
-            nn.Sigmoid()
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 3rd deconvolutional layer (64 -> 32 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 4th deconvolutional layer (32 -> 16 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
+            nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
     def forward(self, x):
@@ -42,16 +52,30 @@ class SharpeningCNN(nn.Module):
         x = self.decoder(x)
         return x
 
-# Clear the console screen
+# Clear the console screen and display the SetiAstro name with copyright notice
 def clear_console():
     try:
         os.system('cls' if os.name == 'nt' else 'clear')
+        print("""
+ *#        ___     __      ___       __                                #
+ *#       / __/___/ /__   / _ | ___ / /________                        #
+ *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                       #
+ *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                       #
+ *#                                                                  #
+ *#                         SetiAstro                                #
+ *#                    Copyright © 2024                              #
+ *#                                                                  #
+        """)
     except Exception as e:
         print(f"Console clearing failed: {e}")
 
 
+
 # Get the directory of the executable or the script location
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
+
+# Use GPU if available, else CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load models dynamically from the same directory as the executable/script
 stellar_model_radius_1 = SharpeningCNN()
@@ -60,11 +84,12 @@ nonstellar_model_radius_2 = SharpeningCNN()
 nonstellar_model_radius_4 = SharpeningCNN()
 nonstellar_model_radius_8 = SharpeningCNN()
 
-stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'sharp_cnn_radius_1.pth')))
-nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_1.pth')))
-nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_2.pth')))
-nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_4.pth')))
-nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_8.pth')))
+# Load the models onto the correct device using map_location
+stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'sharp_cnn_radius_1.pth'), map_location=device))
+nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_1.pth'), map_location=device))
+nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_2.pth'), map_location=device))
+nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_4.pth'), map_location=device))
+nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_8.pth'), map_location=device))
 
 # Set models to evaluation mode
 stellar_model_radius_1.eval()
@@ -73,13 +98,13 @@ nonstellar_model_radius_2.eval()
 nonstellar_model_radius_4.eval()
 nonstellar_model_radius_8.eval()
 
-# Use GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Move models to the correct device
 stellar_model_radius_1.to(device)
 nonstellar_model_radius_1.to(device)
 nonstellar_model_radius_2.to(device)
 nonstellar_model_radius_4.to(device)
 nonstellar_model_radius_8.to(device)
+
 
 # Function to extract luminance (Y channel) from an RGB image
 def extract_luminance(image):
@@ -276,6 +301,16 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
 # Main process for sharpening images
 def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_strength=None, stellar_amount=None):
+    print(("""
+ *#        ___     __      ___       __                                #
+ *#       / __/___/ /__   / _ | ___ / /________                        #
+ *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                       #
+ *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                       #
+ *#                                                                  #
+ *#                         SetiAstro                                #
+ *#                    Copyright © 2024                              #
+ *#                                                                  #
+        """))
     # Use command-line arguments if provided, otherwise fallback to user input
     if sharpening_mode is None or nonstellar_strength is None or stellar_amount is None:
         sharpening_mode, nonstellar_strength, stellar_amount = get_user_input()
