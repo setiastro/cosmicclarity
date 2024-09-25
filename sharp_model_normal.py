@@ -4,6 +4,39 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from torchvision import models
+
+# Define the PerceptualLoss using a pre-trained VGG model
+class PerceptualLoss(nn.Module):
+    def __init__(self):
+        super(PerceptualLoss, self).__init__()
+        vgg = models.vgg16(weights='VGG16_Weights.IMAGENET1K_V1').features[:16].eval()  # Use the first few layers of VGG16
+        self.features = vgg
+        for param in self.features.parameters():
+            param.requires_grad = False
+
+    def forward(self, pred, target):
+        # Ensure the model is on the same device as the input
+        device = pred.device
+        self.features = self.features.to(device)
+        
+        pred_features = self.features(pred)
+        target_features = self.features(target)
+        loss = nn.MSELoss()(pred_features, target_features)
+        return loss
+
+# Define the combined L1 and Perceptual loss
+class StellarCombinedLoss(nn.Module):
+    def __init__(self):
+        super(StellarCombinedLoss, self).__init__()
+        self.l1 = nn.L1Loss()
+        self.perceptual = PerceptualLoss()
+
+    def forward(self, pred, target):
+        l1_loss = self.l1(pred, target)
+        perceptual_loss = self.perceptual(pred, target)
+        # Use a combination: 60% L1 and 40% Perceptual loss
+        return 0.6 * l1_loss + 0.4 * perceptual_loss
 
 # Define the SharpeningDataset class for a single blur radius
 class SharpeningDataset(Dataset):
@@ -42,32 +75,28 @@ class SharpeningDataset(Dataset):
 
 # Define the paths to your dataset for each blur level
 radius_1_dir = r'C:\Users\Gaming\Desktop\Python Code\data\blurred_radius_1'
-#radius_2_dir = r'C:\Users\Gaming\Desktop\Python Code\data\blurred_radius_2'
-#radius_4_dir = r'C:\Users\Gaming\Desktop\Python Code\data\blurred_radius_4'
 clean_dir = r'C:\Users\Gaming\Desktop\Python Code\data\clean_images'
 
 # Create Datasets and DataLoaders for each blur radius
 train_dataset_1 = SharpeningDataset(radius_1_dir, clean_dir)
 train_loader_1 = DataLoader(train_dataset_1, batch_size=12, shuffle=True)
 
-#train_dataset_2 = SharpeningDataset(radius_2_dir, clean_dir)
-#train_loader_2 = DataLoader(train_dataset_2, batch_size=12, shuffle=True)
-
-#train_dataset_4 = SharpeningDataset(radius_4_dir, clean_dir)
-#train_loader_4 = DataLoader(train_dataset_4, batch_size=12, shuffle=True)
-
-# Define the SharpeningCNN model with an additional convolutional layer
+# Define the SharpeningCNN model with adjusted convolutional layers
 class SharpeningCNN(nn.Module):
     def __init__(self):
         super(SharpeningCNN, self).__init__()
         
         # Encoder (down-sampling path)
         self.encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),  # 1st convolutional layer (3 input channels -> 64 feature maps)
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 2nd convolutional layer (64 -> 128 feature maps)
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 3rd convolutional layer (128 -> 256 feature maps)
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 3rd layer (32 -> 64 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 5th layer (128 -> 256 feature maps)
             nn.ReLU()
         )
         
@@ -77,7 +106,11 @@ class SharpeningCNN(nn.Module):
             nn.ReLU(),
             nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 2nd deconvolutional layer (128 -> 64 feature maps)
             nn.ReLU(),
-            nn.Conv2d(64, 3, kernel_size=3, padding=1),  # Output layer (64 -> 3 channels for RGB output)
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 3rd deconvolutional layer (64 -> 32 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 4th deconvolutional layer (32 -> 16 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
@@ -86,15 +119,14 @@ class SharpeningCNN(nn.Module):
         x = self.decoder(x)
         return x
 
-
 # Function to train a model with the provided DataLoader
 def train_model(model, train_loader, num_epochs, model_save_path):
     # Move model to GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    # Define the loss function and optimizer
-    criterion = nn.MSELoss()
+    # Define the hybrid loss function (L1 + Perceptual Loss)
+    criterion = StellarCombinedLoss().to(device)  # Ensure loss function is on the same device
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Training loop
@@ -119,9 +151,6 @@ def train_model(model, train_loader, num_epochs, model_save_path):
             
             total_loss += loss.item()
 
-            # Optionally, print the batch loss if you want more granular feedback
-            #print(f'Batch [{batch_idx+1}/{num_batches}], Loss: {loss.item():.4f}')
-        
         # Average loss over all batches
         avg_epoch_loss = total_loss / num_batches
         print(f'Epoch [{epoch+1}/{num_epochs}], Average Batch Loss: {avg_epoch_loss:.6f}')
@@ -130,17 +159,9 @@ def train_model(model, train_loader, num_epochs, model_save_path):
     torch.save(model.state_dict(), model_save_path)
 
 
-# Instantiate three separate models for each blur radius
+# Instantiate the model for blur radius 1
 model_radius_1 = SharpeningCNN()
-#model_radius_2 = SharpeningCNN()
-#model_radius_4 = SharpeningCNN()
 
-# Train each model with different epochs
+# Train the model for 10 epochs
 print("Training model for blur radius 1 (10 epochs)...")
 train_model(model_radius_1, train_loader_1, 10, 'sharp_cnn_radius_1.pth')
-
-#print("Training model for blur radius 2 (12 epochs)...")
-#train_model(model_radius_2, train_loader_2, 12, 'sharp_cnn_radius_2.pth')
-
-#print("Training model for blur radius 4 (18 epochs)...")
-#train_model(model_radius_4, train_loader_4, 18, 'sharp_cnn_radius_4.pth')
