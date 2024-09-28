@@ -6,7 +6,7 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity09.28.2024.zip" sha1="2e1336a3d7f999dc9b4efb6b589fa9db83e3df7d" type="script" releaseDate="20240928">
+      <package fileName="SetiAstroCosmicClarity09.28.2024.zip" sha1="82ec309f760dd0dc483e4c24bb2e8d71efdf26be" type="script" releaseDate="20240928">
          <title>
         Cosmic Clarity V2.1
       </title>
@@ -21,4 +21,4 @@ Windows users, be sure to update to the latest Cosmic Clarity version here: http
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-09-28T16:50:01.845Z" encoding="Base64">DCYb14bG/kcQyWPsb/gtQIkzH7OD9irkyGNKE0nuCBn1mTwNPS2HCWAeQbyoIyFJWdAm7N8KjDLDGMCzjUH5Ag==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-09-28T16:50:53.312Z" encoding="Base64">ilm+FPg0lXp8w6MPbxAe2Ufh6uq067W5TiTsP1utSL8iitEtoRkPr4JXorl5cioTtwO1A4jKr3HtRtmMFIieDw==</Signature>
