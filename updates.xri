@@ -6,16 +6,19 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity09.25.2024.zip" sha1="bc9d308a09ca898dea3d79acf811f888926b0118" type="script" releaseDate="20240925">
+      <package fileName="SetiAstroCosmicClarity09.28.2024.zip" sha1="2e1336a3d7f999dc9b4efb6b589fa9db83e3df7d" type="script" releaseDate="20240928">
          <title>
-        Cosmic Clarity V2.0
+        Cosmic Clarity V2.1
       </title>
          <description>
             <p>
-V2.0 Supports MacOS operation now.  Script to integrate my Cosmic Clarity AI sharpening programe within PixInsight.
+V2.1 Option to disable GPU acceleration (windows only) as some GPUs have not been able to handle the computational load.  You can uncheck GPU acceleration and it will utilize your CPU.  Also added a message box that after 2 minutes gives you the option to keep waiting for the output file to finish if running on CPU.
+		</p>
+            <p>
+Windows users, be sure to update to the latest Cosmic Clarity version here: https://drive.google.com/file/d/1WQvQvrrLFgzbZwe-exeHjECmawHKYGyS/view?usp=drive_link
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-09-25T20:53:58.279Z" encoding="Base64">DmGuKRc2jeJKiAhih3EDqNlkCkej92sINX+Nw/IaRc8GMGHLgm+teDTlFYoe04vVa5vChjJrrZAvU1HFTRjkAQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-09-28T16:38:52.950Z" encoding="Base64">tocwyP04kLFQQ5o2s0i5HMn4qEyHmbCf//5R+W+FxWkp+1NAqBL6wMtzaUjMG+VuXj5+E+YOOH2yXgLnOJoHBA==</Signature>
