@@ -37,6 +37,7 @@
 
 #define VERSION "v1.0"
 
+// Determine platform and appropriate command/shell setup
 let CMD_EXEC, SCRIPT_EXT;
 if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS" || CoreApplication.platform == "LINUX") {
     CMD_EXEC = "/bin/sh";
@@ -44,20 +45,25 @@ if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS" 
 } else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
     CMD_EXEC = "cmd.exe";
     SCRIPT_EXT = ".bat";
+} else {
+    console.criticalln("Unsupported platform: " + CoreApplication.platform);
 }
 
+// Define platform-agnostic folder paths
 let pathSeparator = (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") ? "\\" : "/";
 let scriptTempDir = File.systemTempDirectory + pathSeparator + "SetiAstroCosmicClarityDenoise";
 let setiAstroDenoiseConfigFile = scriptTempDir + pathSeparator + "setiastrocosmicclaritydenoise_config.csv";
 
+// Ensure the temp directory exists
 if (!File.directoryExists(scriptTempDir)) {
     File.createDirectory(scriptTempDir);
 }
 
+// Define global parameters
 var SetiAstroDenoiseParameters = {
     targetView: undefined,
     isLinear: false,
-    denoiseStrength: 4.0,
+    denoiseStrength: 0.9,  // Default denoise strength
     setiAstroDenoiseParentFolderPath: "",
     useGPU: true,
 
@@ -151,15 +157,16 @@ function SetiAstroDenoiseDialog() {
     this.imageSelectionSizer.add(this.imageSelectionLabel);
     this.imageSelectionSizer.add(this.imageSelectionDropdown, 100);
 
-    // Denoise Strength slider
-    this.denoiseStrengthSlider = new NumericControl(this);
-    this.denoiseStrengthSlider.label.text = "Noise Reduction Strength:";
-    this.denoiseStrengthSlider.setRange(1, 8);
-    this.denoiseStrengthSlider.setValue(SetiAstroDenoiseParameters.denoiseStrength);
-    this.denoiseStrengthSlider.setPrecision(2);
-    this.denoiseStrengthSlider.onValueUpdated = function(value) {
-        SetiAstroDenoiseParameters.denoiseStrength = value;
-    };
+// Denoise Strength slider
+this.denoiseStrengthSlider = new NumericControl(this);
+this.denoiseStrengthSlider.label.text = "Noise Reduction Strength:";
+this.denoiseStrengthSlider.setRange(0, 1);  // Updated range between 0 and 1
+this.denoiseStrengthSlider.setValue(SetiAstroDenoiseParameters.denoiseStrength);
+this.denoiseStrengthSlider.setPrecision(2);  // Keeping 2 decimal places for precision
+this.denoiseStrengthSlider.onValueUpdated = function(value) {
+    SetiAstroDenoiseParameters.denoiseStrength = value;
+};
+
 
     // Linear state checkbox
     this.linearStateCheckbox = new CheckBox(this);
@@ -218,24 +225,20 @@ function SetiAstroDenoiseDialog() {
     this.sizer.addStretch();
     this.sizer.add(this.imageSelectionSizer);
     this.sizer.spacing = 6;
-    this.sizer.add(this.sharpeningModeGroup);
-    this.sizer.spacing = 6;
-    this.sizer.add(this.stellarAmountSlider);
-    this.sizer.add(this.nonStellarStrengthSlider);
+    this.sizer.add(this.denoiseStrengthSlider);
     this.sizer.add(this.linearStateCheckbox);
     this.sizer.addStretch();
 
     // GPU Acceleration checkbox (only for Windows)
-    if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
+
         this.gpuAccelerationCheckbox = new CheckBox(this);
         this.gpuAccelerationCheckbox.text = "Enable GPU Acceleration";
         this.gpuAccelerationCheckbox.checked = true;  // Default to enabled
         this.gpuAccelerationCheckbox.onCheck = function(checked) {
             SetiAstroDenoiseParameters.useGPU = checked;
         };
-
         this.sizer.add(this.gpuAccelerationCheckbox);
-    }
+
 
     this.sizer.add(this.setupButton);
     this.sizer.addSpacing(12);
@@ -244,13 +247,12 @@ function SetiAstroDenoiseDialog() {
     this.windowTitle = "SetiAstroCosmicClarity Script";
     this.adjustToContents();
 
-    // Initially update visibility based on the selected mode
-    this.updateVisibility();
+
 }
 SetiAstroDenoiseDialog.prototype = new Dialog;
 
-// Function to stretch and save image as a 32-bit TIFF
 function saveImageAsTiff(inputFolderPath, view) {
+    // Apply full unlinked stretch if the image is in a linear state
     if (SetiAstroDenoiseParameters.isLinear) {
         console.writeln("Image is in linear state, applying full unlinked stretch.");
 
@@ -258,15 +260,37 @@ function saveImageAsTiff(inputFolderPath, view) {
         let imageMedian = view.mainView.image.median();
         SetiAstroDenoiseParameters.originalMin = imageMin;
         SetiAstroDenoiseParameters.originalMedian = imageMedian;
+        let targetMedian = 0.25; // Target for the second stretch operation
 
-        // Stretching PixelMath
+        // First PixelMath operation: ($T-min($T))/(1-min($T))
         let pixelMath1 = new PixelMath;
-        pixelMath1.expression = "$T - min($T)";
+        if (view.mainView.image.numberOfChannels === 1) {
+            pixelMath1.expression = "$T-min($T)";
+        } else {
+            pixelMath1.expression = "MedColor=avg(med($T[0]),med($T[1]),med($T[2]));\n" +
+                                    "MinColor=min(min($T[0]),min($T[1]),min($T[2]));\n" +
+                                    "SDevColor=avg(sdev($T[0]),sdev($T[1]),sdev($T[2]));\n" +
+                                    "BlackPoint = MinColor;\n" +
+                                    "Rescaled = ($T - BlackPoint);";
+            pixelMath1.symbols = "BlackPoint, Rescaled, MedColor, MinColor, SDevColor";
+        }
         pixelMath1.useSingleExpression = true;
         pixelMath1.executeOn(view.mainView);
+
+        // Second PixelMath operation: ((Med($T)-1)*0.25*$T)/(Med($T)*(0.25+$T-1)-0.25*$T)
+        let pixelMath2 = new PixelMath;
+        if (view.mainView.image.numberOfChannels === 1) {
+            pixelMath2.expression = "((Med($T)-1)*" + targetMedian + "*$T)/(Med($T)*(0.25+$T-1)-0.25*$T)";
+        } else {
+            pixelMath2.expression = "MedianColor = avg(Med($T[0]),Med($T[1]),Med($T[2]));\n" +
+                                    "((MedianColor-1)*" + targetMedian + "*$T)/(MedianColor*(" + targetMedian + "+$T-1)-" + targetMedian + "*$T)";
+            pixelMath2.symbols = "MedianColor";
+        }
+        pixelMath2.useSingleExpression = true;
+        pixelMath2.executeOn(view.mainView);
     }
 
-    // Save the image as 32-bit TIFF using FileFormatInstance
+    // Save the stretched image as a 32-bit TIFF
     let filePath = inputFolderPath + pathSeparator + view.mainView.id + ".tiff";
     let F = new FileFormat("TIFF", false, true);
     if (F.isNull)
@@ -298,6 +322,7 @@ function saveImageAsTiff(inputFolderPath, view) {
     return filePath;
 }
 
+
 // Create batch file to run the denoise process
 function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU) {
     let batchContent;
@@ -306,11 +331,13 @@ function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU) {
     if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS") {
         batchContent = "#!/bin/sh\n";
         batchContent += "cd \"" + exePath + "\"\n";
-        batchContent += "./setiastrocosmicclaritydenoise " +
-                        "--denoise_strength " + denoiseStrength.toFixed(2) + "\n";
-
-    // Windows batch script with GPU handling
-    } else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
+        batchContent += 'osascript -e \'tell application "Terminal" to do script "' +
+                        exePath + "/setiastrocosmicclarity_denoisemac " +  // Use the full path to the executable
+                        '--denoise_strength ' + denoiseStrength.toFixed(2) + " " +
+                        (useGPU ? "" : "--disable_gpu") + '"\'\n';
+    }
+    // Windows script
+    else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
         batchContent = "@echo off\n";
         batchContent += "cd /d \"" + exePath + "\"\n";
         batchContent += "start setiastrocosmicclaritydenoise.exe " +
@@ -335,7 +362,47 @@ function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU) {
     return true;
 }
 
-// Process output image after denoising
+// Function to wait for the output file and handle the image processing
+function waitForFile(outputFilePath, timeoutSeconds = 120) {
+    let elapsedTime = 0;
+    let pollingInterval = 1000;  // Poll every 1 second
+    while (elapsedTime < timeoutSeconds * 1000) {
+        if (File.exists(outputFilePath)) {
+            console.writeln("Output file found: " + outputFilePath);
+            return true;
+        }
+        msleep(pollingInterval);
+        elapsedTime += pollingInterval;
+    }
+    console.criticalln("Timeout waiting for file: " + outputFilePath);
+    return false;
+}
+
+// Function to revert the image to its original linear state after denoising
+function revertToLinearState(view) {
+    if (SetiAstroDenoiseParameters.isLinear) {
+        console.writeln("Reverting to original linear state.");
+
+        let originalMedian = SetiAstroDenoiseParameters.originalMedian;
+        let originalMin = SetiAstroDenoiseParameters.originalMin;
+
+        // First PixelMath operation to undo the unlinked stretch
+        let pixelMath1 = new PixelMath;
+        if (view.mainView.image.numberOfChannels === 1) {
+            pixelMath1.expression = "((Med($T)-1)*" + originalMedian + "*$T)/(Med($T)*(" + originalMedian + "+$T-1)-" + originalMedian + "*$T)";
+        } else {
+            pixelMath1.expression = "MedColor = avg(Med($T[0]), Med($T[1]), Med($T[2]));\n" +
+                                    "((MedColor-1)*" + originalMedian + "*$T)/(MedColor*(" + originalMedian + "+$T-1)-" + originalMedian + "*$T)";
+            pixelMath1.symbols = "MedColor";
+        }
+        pixelMath1.useSingleExpression = true;
+        pixelMath1.executeOn(view.mainView);
+
+        console.writeln("Image reverted to original linear state.");
+    }
+}
+
+// Process the denoised image after waiting for it
 function processOutputImage(outputFilePath, targetView) {
     if (!File.exists(outputFilePath)) {
         console.criticalln("Denoised file not found: " + outputFilePath);
@@ -345,6 +412,7 @@ function processOutputImage(outputFilePath, targetView) {
     let denoisedWindow = ImageWindow.open(outputFilePath)[0];
     if (denoisedWindow) {
         denoisedWindow.show();
+
         let pixelMath = new PixelMath;
         pixelMath.expression = "iif(" + denoisedWindow.mainView.id + " == 0, $T, " + denoisedWindow.mainView.id + ")";
         pixelMath.useSingleExpression = true;
@@ -358,10 +426,29 @@ function processOutputImage(outputFilePath, targetView) {
         } catch (error) {
             console.warningln("Failed to delete denoised file: " + outputFilePath);
         }
+
+        // Revert the image back to its original linear state
+        revertToLinearState(targetView);
     } else {
         console.criticalln("Failed to open denoised image: " + outputFilePath);
     }
 }
+
+
+// Function to delete the input file
+function deleteInputFile(inputFilePath) {
+    try {
+        if (File.exists(inputFilePath)) {
+            File.remove(inputFilePath);
+            console.writeln("Deleted input file: " + inputFilePath);
+        } else {
+            console.warningln("Input file not found: " + inputFilePath);
+        }
+    } catch (error) {
+        console.warningln("Failed to delete input file: " + inputFilePath);
+    }
+}
+
 
 // Main execution block for running the script
 let dialog = new SetiAstroDenoiseDialog();
@@ -402,11 +489,11 @@ if (dialog.execute()) {
                 console.criticalln("Error starting process: " + error.message);
             }
 
-            if (waitForFile(outputFilePath, 120)) {
+            if (waitForFile(outputFilePath, 600)) {
                 processOutputImage(outputFilePath, selectedView);
                 deleteInputFile(inputFilePath);
             } else {
-                console.criticalln("Output file not found after 120 seconds.");
+                console.criticalln("Output file not found within timeout.");
             }
         }
     }
