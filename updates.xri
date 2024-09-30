@@ -6,19 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity09.28.2024.zip" sha1="82ec309f760dd0dc483e4c24bb2e8d71efdf26be" type="script" releaseDate="20240928">
+      <package fileName="SetiAstroCosmicClarity09.30.2024.zip" sha1="7b79601aef327323a04f494b40d05689b136a249" type="script" releaseDate="20240930">
          <title>
-        Cosmic Clarity V2.1
+        Cosmic Clarity V2.2
       </title>
          <description>
             <p>
-V2.1 Option to disable GPU acceleration (windows only) as some GPUs have not been able to handle the computational load.  You can uncheck GPU acceleration and it will utilize your CPU.  Also added a message box that after 2 minutes gives you the option to keep waiting for the output file to finish if running on CPU.
-		</p>
-            <p>
-Windows users, be sure to update to the latest Cosmic Clarity version here: https://drive.google.com/file/d/1WQvQvrrLFgzbZwe-exeHjECmawHKYGyS/view?usp=drive_link
+V2.2 Now will save the tiff in the correct format without the additional popups to get input from the user.  It will automatically save as 32-bit floating point tiff correctly.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-09-28T16:50:53.312Z" encoding="Base64">ilm+FPg0lXp8w6MPbxAe2Ufh6uq067W5TiTsP1utSL8iitEtoRkPr4JXorl5cioTtwO1A4jKr3HtRtmMFIieDw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-09-30T14:30:16.921Z" encoding="Base64">knxLr4fa9VPhJv44KaCzLLg3BVv7sRiO4q8KU1NmsDSG8yxIlAs2uz81Kr8bhEA1Hxs1LvGb6StuyR3PpVKAAQ==</Signature>
