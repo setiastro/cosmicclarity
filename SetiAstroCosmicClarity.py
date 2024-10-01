@@ -52,59 +52,50 @@ class SharpeningCNN(nn.Module):
         x = self.decoder(x)
         return x
 
-# Clear the console screen and display the SetiAstro name with copyright notice
-def clear_console():
-    try:
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print("""
- *#        ___     __      ___       __                                #
- *#       / __/___/ /__   / _ | ___ / /________                        #
- *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                       #
- *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                       #
- *#                                                                  #
- *#                         SetiAstro                                #
- *#                    Copyright © 2024                              #
- *#                                                                  #
-        """)
-    except Exception as e:
-        print(f"Console clearing failed: {e}")
-
-
 
 # Get the directory of the executable or the script location
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
-# Use GPU if available, else CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Function to initialize and load models
+def load_models(exe_dir, use_gpu=True):
+    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-# Load models dynamically from the same directory as the executable/script
-stellar_model_radius_1 = SharpeningCNN()
-nonstellar_model_radius_1 = SharpeningCNN()
-nonstellar_model_radius_2 = SharpeningCNN()
-nonstellar_model_radius_4 = SharpeningCNN()
-nonstellar_model_radius_8 = SharpeningCNN()
+    stellar_model_radius_1 = SharpeningCNN()
+    nonstellar_model_radius_1 = SharpeningCNN()
+    nonstellar_model_radius_2 = SharpeningCNN()
+    nonstellar_model_radius_4 = SharpeningCNN()
+    nonstellar_model_radius_8 = SharpeningCNN()
 
-# Load the models onto the correct device using map_location
-stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'sharp_cnn_radius_1.pth'), map_location=device))
-nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_1.pth'), map_location=device))
-nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_2.pth'), map_location=device))
-nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_4.pth'), map_location=device))
-nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_8.pth'), map_location=device))
+    # Load models onto the correct device
+    stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'sharp_cnn_radius_1.pth'), map_location=device))
+    nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_1.pth'), map_location=device))
+    nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_2.pth'), map_location=device))
+    nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_4.pth'), map_location=device))
+    nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'nonstellar_sharp_cnn_radius_8.pth'), map_location=device))
 
-# Set models to evaluation mode
-stellar_model_radius_1.eval()
-nonstellar_model_radius_1.eval()
-nonstellar_model_radius_2.eval()
-nonstellar_model_radius_4.eval()
-nonstellar_model_radius_8.eval()
+    # Set models to evaluation mode
+    stellar_model_radius_1.eval()
+    nonstellar_model_radius_1.eval()
+    nonstellar_model_radius_2.eval()
+    nonstellar_model_radius_4.eval()
+    nonstellar_model_radius_8.eval()
 
-# Move models to the correct device
-stellar_model_radius_1.to(device)
-nonstellar_model_radius_1.to(device)
-nonstellar_model_radius_2.to(device)
-nonstellar_model_radius_4.to(device)
-nonstellar_model_radius_8.to(device)
+    # Move models to the correct device
+    stellar_model_radius_1.to(device)
+    nonstellar_model_radius_1.to(device)
+    nonstellar_model_radius_2.to(device)
+    nonstellar_model_radius_4.to(device)
+    nonstellar_model_radius_8.to(device)
 
+    return {
+        "stellar_model": stellar_model_radius_1,
+        "nonstellar_model_1": nonstellar_model_radius_1,
+        "nonstellar_model_2": nonstellar_model_radius_2,
+        "nonstellar_model_4": nonstellar_model_radius_4,
+        "nonstellar_model_8": nonstellar_model_radius_8,
+        "device": device
+    }
 
 # Function to extract luminance (Y channel) from an RGB image
 def extract_luminance(image):
@@ -117,21 +108,12 @@ def show_progress(current, total):
     progress_percentage = (current / total) * 100
     print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r')
 
-
 # Function to merge the sharpened luminance (Y) with original chrominance (Cb and Cr) to reconstruct RGB image
 def merge_luminance(y_sharpened, cb, cr):
     y_sharpened = np.clip(y_sharpened * 255, 0, 255).astype(np.uint8)
     y_sharpened_img = Image.fromarray(y_sharpened)
     ycbcr_image = Image.merge('YCbCr', (y_sharpened_img, cb, cr))
     return ycbcr_image.convert('RGB')
-
-# Soft blending weights for the overlap area
-def generate_blend_weights(chunk_size, overlap):
-    ramp = np.linspace(0, 1, overlap)
-    flat = np.ones(chunk_size - 2 * overlap)
-    blend_vector = np.concatenate([ramp, flat, ramp[::-1]])  # Create smooth transition
-    blend_matrix = np.outer(blend_vector, blend_vector)  # 2D blending weights
-    return blend_matrix
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -147,6 +129,14 @@ def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
             is_edge = i == 0 or j == 0 or (i + chunk_size >= height) or (j + chunk_size >= width)  # Check if on edge
             chunks.append((chunk, i, j, is_edge))  # Return chunk and its position, and whether it's an edge chunk
     return chunks
+
+# Soft blending weights for the overlap area
+def generate_blend_weights(chunk_size, overlap):
+    ramp = np.linspace(0, 1, overlap)
+    flat = np.ones(chunk_size - 2 * overlap)
+    blend_vector = np.concatenate([ramp, flat, ramp[::-1]])  # Create smooth transition
+    blend_matrix = np.outer(blend_vector, blend_vector)  # 2D blending weights
+    return blend_matrix
 
 # Function to stitch overlapping chunks back together with soft blending while ignoring borders for all chunks
 def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=5):
@@ -169,37 +159,43 @@ def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border
     stitched_image /= np.maximum(weight_map, 1)  # Avoid division by zero
     return stitched_image
 
+# Function to blend two images (before and after)
+def blend_images(before, after, amount):
+    return (1 - amount) * before + amount * after
 
 # Function to interpolate the results for non-stellar sharpening based on strength
 def interpolate_nonstellar_sharpening(sharpened_1, sharpened_2, sharpened_4, sharpened_8, strength):
     if strength <= 2:
-        return (2 - strength) * sharpened_1 + (strength - 1) * sharpened_2
+        return blend_images(sharpened_1, sharpened_2, strength - 1)
     elif 2 < strength <= 4:
-        return ((4 - strength) * sharpened_2 + (strength - 2) * sharpened_4) / 2
+        return blend_images(sharpened_2, sharpened_4, (strength - 2) / 2)
     else:
-        return ((8 - strength) * sharpened_4 + (strength - 4) * sharpened_8) / 4
+        return blend_images(sharpened_4, sharpened_8, (strength - 4) / 4)
 
 # Function to get user input for sharpening mode, non-stellar strength, and stellar amount (Interactive)
 def get_user_input():
     root = tk.Tk()
     root.withdraw()
 
-    valid_stellar_inputs = ["Stellar", "Stellar Only"]
-    valid_nonstellar_inputs = ["Non-Stellar", "Non-Stellar Only"]
+    # Ask user if they want to disable GPU acceleration
+    use_gpu = messagebox.askyesno("GPU Acceleration", "Do you want to use GPU acceleration? (Yes: Enable GPU, No: Use CPU)")
+
+    valid_stellar_inputs = ["Stellar", "Stellar Only", "stellar"]
+    valid_nonstellar_inputs = ["Non-Stellar", "Non-Stellar Only", "non-stellar"]
     sharpening_options = valid_stellar_inputs + valid_nonstellar_inputs + ["Both"]
 
     sharpening_mode = simpledialog.askstring("Sharpening Mode", "Choose sharpening mode (Stellar, Non-Stellar, Both):")
-    
+
     # Normalize the input for "Stellar" and "Non-Stellar"
     if sharpening_mode in valid_stellar_inputs:
         sharpening_mode = "Stellar Only"
     elif sharpening_mode in valid_nonstellar_inputs:
         sharpening_mode = "Non-Stellar Only"
-    
+
     if sharpening_mode not in sharpening_options:
         messagebox.showerror("Error", "Invalid choice. Defaulting to 'Both'.")
         sharpening_mode = "Both"
-    
+
     # Ask for Stellar Amount only if mode is "Stellar Only" or "Both"
     stellar_amount = None
     if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
@@ -211,15 +207,23 @@ def get_user_input():
 
     root.destroy()
 
-    return sharpening_mode, nonstellar_strength, stellar_amount
+    return use_gpu, sharpening_mode, nonstellar_strength, stellar_amount
+
+# Function to show progress during chunk processing
+def show_progress(current, total):
+    progress_percentage = (current / total) * 100
+    print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)")
+    sys.stdout.flush()  # Ensure the progress is flushed to the output immediately
 
 
-# Function to blend two images (before and after)
-def blend_images(before, after, amount):
-    return (1 - amount) * before + amount * after
+# Function to show progress during chunk processing
+def show_progress(current, total):
+    progress_percentage = (current / total) * 100
+    print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)")
+    sys.stdout.flush()  # Ensure the progress is flushed to the output immediately
 
 # Function to sharpen an image
-def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount):
+def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, device, models):
     image = None
     file_extension = image_path.lower().split('.')[-1]
 
@@ -246,28 +250,36 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
     nonstellar_sharpened = None
     sharpened_luminance = luminance  # Initialize in case neither path modifies it
 
+    # Use dictionary to select the non-stellar model based on nonstellar_strength
+    model_map = {
+        1: models["nonstellar_model_1"],
+        2: models["nonstellar_model_2"],
+        4: models["nonstellar_model_4"],
+        8: models["nonstellar_model_8"]
+    }
+
     # Apply non-stellar sharpening if applicable
     if nonstellar_strength is not None:
-        for idx, (chunk, i, j, is_edge) in enumerate(chunks):  # Updated with enumerate to get the idx
+        for idx, (chunk, i, j, is_edge) in enumerate(chunks):
             chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
 
             if nonstellar_strength in [1, 2, 4, 8]:
                 with torch.no_grad():
-                    active_model = eval(f'nonstellar_model_radius_{int(nonstellar_strength)}')
+                    active_model = model_map[int(nonstellar_strength)]
                     sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
             else:
+                # Interpolation for nonstellar_strength between available models
                 if nonstellar_strength <= 4:
-                    sharpened_chunk_a = nonstellar_model_radius_2(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                    sharpened_chunk_b = nonstellar_model_radius_4(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                    sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                    sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                     sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
                 else:
-                    sharpened_chunk_a = nonstellar_model_radius_4(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                    sharpened_chunk_b = nonstellar_model_radius_8(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                    sharpened_chunk_a = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                    sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                     sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
 
             denoised_chunks.append((sharpened_chunk, i, j, is_edge))
-            # Update progress
-            show_progress(idx + 1, total_chunks)
+            show_progress(idx + 1, total_chunks)  # Update progress after processing each chunk
 
         nonstellar_sharpened = stitch_chunks_ignore_border(denoised_chunks, luminance.shape, chunk_size=256, overlap=64)
 
@@ -276,13 +288,12 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
     # Apply stellar sharpening (fixed at strength 1)
     if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
-        for idx, (chunk, i, j, is_edge) in enumerate(chunks):  # Updated with enumerate
+        for idx, (chunk, i, j, is_edge) in enumerate(chunks):
             chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
             with torch.no_grad():
-                sharpened_chunk = stellar_model_radius_1(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
             stellar_sharpened_chunks.append((sharpened_chunk, i, j, is_edge))
-            # Update progress
-            show_progress(idx + 1, total_chunks)
+            show_progress(idx + 1, total_chunks)  # Update progress after each chunk
 
         stellar_sharpened_luminance = stitch_chunks_ignore_border(stellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
 
@@ -295,33 +306,38 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         # If only non-stellar, stitch the non-stellar sharpened image
         sharpened_luminance = nonstellar_sharpened
 
+    # Merge back the sharpened luminance with the original chrominance (Cb, Cr)
     sharpened_image = merge_luminance(sharpened_luminance, cb, cr)
     return sharpened_image
 
-
 # Main process for sharpening images
-def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_strength=None, stellar_amount=None):
-    print(("""
- *#        ___     __      ___       __                                #
- *#       / __/___/ /__   / _ | ___ / /________                        #
- *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                       #
- *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                       #
+def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_strength=None, stellar_amount=None, use_gpu=True):
+    print((r"""
+ *#        ___     __      ___       __                              #
+ *#       / __/___/ /__   / _ | ___ / /________                      #
+ *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
+ *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
+ *#                                                                  #
+ *#              Cosmic Clarity - Sharpen V2.1                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
  *#                                                                  #
         """))
+
     # Use command-line arguments if provided, otherwise fallback to user input
     if sharpening_mode is None or nonstellar_strength is None or stellar_amount is None:
-        sharpening_mode, nonstellar_strength, stellar_amount = get_user_input()
+        use_gpu, sharpening_mode, nonstellar_strength, stellar_amount = get_user_input()
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    models = load_models(exe_dir, use_gpu)
+
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
-        sharpened_image = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount)
-        
+        sharpened_image = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, models['device'], models)
+
         if sharpened_image:
             file_extension = os.path.splitext(image_name)[1].lower()
             if file_extension in ['.tif', '.tiff']:
@@ -338,14 +354,24 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
 input_dir = os.path.join(exe_dir, 'input')
 output_dir = os.path.join(exe_dir, 'output')
 
+# Ensure the input and output directories exist
+if not os.path.exists(input_dir):
+    os.makedirs(input_dir)
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
 # Add argument parsing for batch/script execution
 parser = argparse.ArgumentParser(description="Stellar and Non-Stellar Sharpening Tool")
 parser.add_argument('--sharpening_mode', type=str, choices=["Stellar Only", "Non-Stellar Only", "Both"],
                     help="Choose the sharpening mode: Stellar Only, Non-Stellar Only, Both")
 parser.add_argument('--nonstellar_strength', type=float, help="Non-Stellar sharpening strength (1-8)")
 parser.add_argument('--stellar_amount', type=float, default=0.9, help="Stellar sharpening amount (0-1)")
+parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
 
 args = parser.parse_args()
 
+# Determine whether to use GPU based on command-line argument
+use_gpu = not args.disable_gpu  # If --disable_gpu is passed, set use_gpu to False
+
 # Pass arguments if provided, or fall back to user input if no command-line arguments are provided
-process_images(input_dir, output_dir, args.sharpening_mode, args.nonstellar_strength, args.stellar_amount)
+process_images(input_dir, output_dir, args.sharpening_mode, args.nonstellar_strength, args.stellar_amount, use_gpu)

@@ -70,17 +70,22 @@ def load_model(exe_dir, use_gpu=True):
         "device": device
     }
 
-# Function to extract luminance (Y channel) from an RGB image
-def extract_luminance(image):
+# Function to extract Y, Cb, Cr channels from an RGB image
+def extract_ycbcr(image):
     ycbcr_image = image.convert('YCbCr')
     y, cb, cr = ycbcr_image.split()
-    return np.array(y).astype(np.float32) / 255.0, cb, cr
+    return np.array(y).astype(np.float32) / 255.0, np.array(cb).astype(np.float32) / 255.0, np.array(cr).astype(np.float32) / 255.0
 
-# Function to merge the denoised luminance (Y) with original chrominance (Cb and Cr) to reconstruct RGB image
-def merge_luminance(y_denoised, cb, cr):
+# Function to merge the denoised Y, Cb, Cr channels back to an RGB image
+def merge_ycbcr(y_denoised, cb, cr):
     y_denoised = np.clip(y_denoised * 255, 0, 255).astype(np.uint8)
+    cb = np.clip(cb * 255, 0, 255).astype(np.uint8)
+    cr = np.clip(cr * 255, 0, 255).astype(np.uint8)
+
     y_denoised_img = Image.fromarray(y_denoised)
-    ycbcr_image = Image.merge('YCbCr', (y_denoised_img, cb, cr))
+    cb_img = Image.fromarray(cb)
+    cr_img = Image.fromarray(cr)
+    ycbcr_image = Image.merge('YCbCr', (y_denoised_img, cb_img, cr_img))
     return ycbcr_image.convert('RGB')
 
 # Function to split an image into chunks with overlap
@@ -94,8 +99,7 @@ def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
             end_i = min(i + chunk_size, height)
             end_j = min(j + chunk_size, width)
             chunk = image[i:end_i, j:end_j]
-            is_edge = i == 0 or j == 0 or (i + chunk_size >= height) or (j + chunk_size >= width)  # Check if on edge
-            chunks.append((chunk, i, j, is_edge))  # Return chunk and its position, and whether it's an edge chunk
+            chunks.append((chunk, i, j))  # Return chunk and its position
     return chunks
 
 # Soft blending weights for the overlap area
@@ -111,7 +115,7 @@ def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border
     stitched_image = np.zeros(image_shape, dtype=np.float32)
     weight_map = np.zeros(image_shape, dtype=np.float32)  # Track blending weights
     
-    for chunk, i, j, is_edge in chunks:
+    for chunk, i, j in chunks:
         actual_chunk_h, actual_chunk_w = chunk.shape
         
         # Calculate the boundaries for the current chunk, ignoring the border
@@ -141,68 +145,115 @@ def get_user_input():
 
     denoise_strength = simpledialog.askfloat("Denoise Strength", "Enter denoise strength (0-1):", initialvalue=0.9, minvalue=0, maxvalue=1)
 
+    # Ask user for denoise mode (luminance or full)
+    denoise_mode = messagebox.askquestion("Denoise Mode", "Do you want full YCbCr denoise? (Yes: Full denoise, No: Luminance only)") 
+    denoise_mode = "full" if denoise_mode == "yes" else "luminance"
+
     root.destroy()
 
-    return use_gpu, denoise_strength
+    return use_gpu, denoise_strength, denoise_mode
 
 # Function to show progress during chunk processing
 def show_progress(current, total):
     progress_percentage = (current / total) * 100
     print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r', flush=True)
 
+# Function to denoise a channel (Y, Cb, Cr)
+def denoise_channel(channel, device, model):
+    # Split channel into chunks
+    chunk_size = 256
+    overlap = 64
+    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
 
-# Function to denoise an image
-def denoise_image(image_path, denoise_strength, device, model):
+    denoised_chunks = []
+
+    # Apply denoise model to each chunk
+    for idx, (chunk, i, j) in enumerate(chunks):
+        chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+        with torch.no_grad():
+            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+        denoised_chunks.append((denoised_chunk, i, j))
+
+        # Show progress update
+        show_progress(idx + 1, len(chunks))
+
+    # Stitch the chunks back together
+    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
+    return denoised_channel
+
+# Function to denoise an image (luminance or full RGB mode)
+def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
     image = None
     file_extension = image_path.lower().split('.')[-1]
 
     try:
         if file_extension in ['tif', 'tiff']:
             image = tiff.imread(image_path).astype(np.float32)
-            if len(image.shape) == 2:
-                image = np.stack([image]*3, axis=-1)
-            image = Image.fromarray((image * 255).astype(np.uint8))
+
+            # Check if image is grayscale (mono) or color
+            if len(image.shape) == 2:  # Grayscale image
+                print("Detected grayscale (mono) image. Forcing luminance denoise mode.")
+                denoise_mode = 'luminance'  # Force luminance mode for grayscale images
+                image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
+            else:
+                print("Detected color image.")
+            image = Image.fromarray((image * 255).astype(np.uint8))  # Convert float32 TIFF to uint8 image for PIL
+
         else:
-            image = Image.open(image_path).convert('RGB')
+            image = Image.open(image_path).convert('RGB')  # Convert to RGB for PIL handling
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
         return None
 
-    luminance, cb, cr = extract_luminance(image)
+    if denoise_mode == 'luminance':
+        print("Denoising Luminance (Y) channel only...")
+        # Convert image to YCbCr, denoise Y channel (luminance)
+        y, cb, cr = extract_ycbcr(image)
+        denoised_y = denoise_channel(y, device, model)
+        denoised_image = merge_ycbcr(denoised_y, cb, cr)
+    else:
+        print("Denoising full RGB channels (R, G, B)...")
+        # Split image into R, G, and B channels and denoise each separately
+        r, g, b = image.split()  # Split image into R, G, and B channels
+        denoised_r = denoise_channel(np.array(r).astype(np.float32) / 255.0, device, model)
+        denoised_g = denoise_channel(np.array(g).astype(np.float32) / 255.0, device, model)
+        denoised_b = denoise_channel(np.array(b).astype(np.float32) / 255.0, device, model)
 
-    # Split luminance into chunks
+        # Merge the denoised R, G, and B channels back into an RGB image
+        denoised_r = np.clip(denoised_r * 255, 0, 255).astype(np.uint8)
+        denoised_g = np.clip(denoised_g * 255, 0, 255).astype(np.uint8)
+        denoised_b = np.clip(denoised_b * 255, 0, 255).astype(np.uint8)
+        denoised_image = Image.merge('RGB', (Image.fromarray(denoised_r), Image.fromarray(denoised_g), Image.fromarray(denoised_b)))
+
+    return denoised_image
+
+
+# Function to denoise a single channel
+def denoise_channel(channel, device, model):
+    # Split channel into chunks
     chunk_size = 256
     overlap = 64
-    chunks = split_image_into_chunks_with_overlap(luminance, chunk_size=chunk_size, overlap=overlap)
-    total_chunks = len(chunks)
-
-    print(f"Denoising Image: {os.path.basename(image_path)}")
-    print(f"Total Chunks: {total_chunks}")
+    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
 
     denoised_chunks = []
 
     # Apply denoise model to each chunk
-    for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+    for idx, (chunk, i, j) in enumerate(chunks):
         chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
         with torch.no_grad():
             denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-        denoised_chunks.append((denoised_chunk, i, j, is_edge))
+        denoised_chunks.append((denoised_chunk, i, j))
 
         # Show progress update
-        show_progress(idx + 1, total_chunks)
+        show_progress(idx + 1, len(chunks))
 
-    # Stitch the chunks back together with soft blending
-    denoised_luminance = stitch_chunks_ignore_border(denoised_chunks, luminance.shape, chunk_size=chunk_size, overlap=overlap)
+    # Stitch the chunks back together
+    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
+    return denoised_channel
 
-    # Blend the original and denoised luminance using the denoise strength
-    blended_luminance = blend_images(luminance, denoised_luminance, denoise_strength)
-
-    # Merge back the denoised luminance with the original chrominance (Cb, Cr)
-    denoised_image = merge_luminance(blended_luminance, cb, cr)
-    return denoised_image
 
 # Main process for denoising images
-def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True):
+def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
     print((r"""
  *#        ___     __      ___       __                              #
  *#       / __/___/ /__   / _ | ___ / /________                      #
@@ -217,7 +268,8 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True):
         """))
 
     if denoise_strength is None:
-        use_gpu, denoise_strength = get_user_input()
+        # Prompt for user input
+        use_gpu, denoise_strength, denoise_mode = get_user_input()
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -226,7 +278,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True):
 
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
-        denoised_image = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"])
+        denoised_image = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
 
         if denoised_image:
             file_extension = os.path.splitext(image_name)[1].lower()
@@ -253,11 +305,12 @@ if not os.path.exists(output_dir):
 parser = argparse.ArgumentParser(description="Cosmic Clarity Denoise Tool")
 parser.add_argument('--denoise_strength', type=float, help="Denoise strength (0-1)")
 parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
+parser.add_argument('--denoise_mode', type=str, choices=['luminance', 'full'], default='luminance', help="Denoise mode: luminance or full YCbCr denoising")
 
 args = parser.parse_args()
 
 # Determine whether to use GPU based on command-line argument
 use_gpu = not args.disable_gpu
 
-# Pass arguments if provided, or fall back to user input
-process_images(input_dir, output_dir, args.denoise_strength, use_gpu)
+# Pass arguments if provided, or fall back to defaults
+process_images(input_dir, output_dir, args.denoise_strength, use_gpu, args.denoise_mode)
