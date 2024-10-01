@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity09.30.2024.zip" sha1="7b79601aef327323a04f494b40d05689b136a249" type="script" releaseDate="20240930">
+      <package fileName="SetiAstroCosmicClarity10.01.2024.zip" sha1="c9b7dec77ff3c07ead5b695d9264e4d18e34c296" type="script" releaseDate="20241001">
          <title>
-        Cosmic Clarity V2.2
+        Cosmic Clarity - Denoise and Sharpen
       </title>
          <description>
             <p>
-V2.2 Now will save the tiff in the correct format without the additional popups to get input from the user.  It will automatically save as 32-bit floating point tiff correctly.
+Cosmic Clarity is now in two parts.  Cosmic Clarity - Sharpen and Cosmic Clarity - Denoise.  Denoise was trained to fill in the noise reduction gap where mono images weren&apos;t supported in other denoising programs like DeepSNR.  Cosmic Clarity - Denoise can be used on Mono or Color images and do a full denoising or just denoise the Luminance layer.  Please visit my website to get the latest Cosmic Clarity program for Windows or MacOS.  www.setiastro.com
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-09-30T14:30:16.921Z" encoding="Base64">knxLr4fa9VPhJv44KaCzLLg3BVv7sRiO4q8KU1NmsDSG8yxIlAs2uz81Kr8bhEA1Hxs1LvGb6StuyR3PpVKAAQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-01T14:10:03.373Z" encoding="Base64">vDUq0KOvNCGas2NKpsW0y8oWz/MoBIw+ijYi1iS7/tLJj4f01Pc1EDeNh+QObkil594We4g+KGyoTPR+QMzkCw==</Signature>
