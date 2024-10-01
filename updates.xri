@@ -6,7 +6,7 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.01.2024.zip" sha1="c9b7dec77ff3c07ead5b695d9264e4d18e34c296" type="script" releaseDate="20241001">
+      <package fileName="SetiAstroCosmicClarity10.01.2024_1.zip" sha1="c9b7dec77ff3c07ead5b695d9264e4d18e34c296" type="script" releaseDate="20241001">
          <title>
         Cosmic Clarity - Denoise and Sharpen
       </title>
@@ -18,4 +18,4 @@ Cosmic Clarity is now in two parts.  Cosmic Clarity - Sharpen and Cosmic Clarity
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-01T14:10:03.373Z" encoding="Base64">vDUq0KOvNCGas2NKpsW0y8oWz/MoBIw+ijYi1iS7/tLJj4f01Pc1EDeNh+QObkil594We4g+KGyoTPR+QMzkCw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-01T14:28:36.326Z" encoding="Base64">rOQwrIjpV9AgoHOMMaz9qoCiu3lPQyn17NyF23rh4Gr9pBuzHevEYXXgNvceRB7YvJJUcu+tPIcFMxUlJO1NDQ==</Signature>
