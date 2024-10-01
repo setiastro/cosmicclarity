@@ -66,14 +66,14 @@ var SetiAstroDenoiseParameters = {
     denoiseStrength: 0.9,  // Default denoise strength
     setiAstroDenoiseParentFolderPath: "",
     useGPU: true,
-
-    configFilePath: setiAstroDenoiseConfigFile,
+    denoiseMode: "full",  // Default mode set to 'luminance'
 
     save: function() {
         Parameters.set("isLinear", this.isLinear);
         Parameters.set("useGPU", this.useGPU);
         Parameters.set("setiAstroDenoiseParentFolderPath", this.setiAstroDenoiseParentFolderPath);
         Parameters.set("denoiseStrength", this.denoiseStrength);
+        Parameters.set("denoiseMode", this.denoiseMode);  // Save denoiseMode
         this.savePathToFile();
     },
 
@@ -86,13 +86,14 @@ var SetiAstroDenoiseParameters = {
             this.setiAstroDenoiseParentFolderPath = Parameters.getString("setiAstroDenoiseParentFolderPath");
         if (Parameters.has("denoiseStrength"))
             this.denoiseStrength = Parameters.getReal("denoiseStrength");
+        if (Parameters.has("denoiseMode"))
+            this.denoiseMode = Parameters.getString("denoiseMode");  // Load denoiseMode
         this.loadPathFromFile();
     },
-
     savePathToFile: function() {
         try {
             let file = new File;
-            file.createForWriting(this.configFilePath);
+            file.createForWriting(setiAstroDenoiseConfigFile);
             file.outTextLn(this.setiAstroDenoiseParentFolderPath);
             file.close();
         } catch (error) {
@@ -102,10 +103,10 @@ var SetiAstroDenoiseParameters = {
 
     loadPathFromFile: function() {
         try {
-            if (File.exists(this.configFilePath)) {
+            if (File.exists(setiAstroDenoiseConfigFile)) {
                 let file = new File;
-                file.openForReading(this.configFilePath);
-                let lines = File.readLines(this.configFilePath);
+                file.openForReading(setiAstroDenoiseConfigFile);
+                let lines = File.readLines(setiAstroDenoiseConfigFile);
                 if (lines.length > 0) {
                     this.setiAstroDenoiseParentFolderPath = lines[0].trim();
                 }
@@ -167,6 +168,29 @@ this.denoiseStrengthSlider.onValueUpdated = function(value) {
     SetiAstroDenoiseParameters.denoiseStrength = value;
 };
 
+    // Radio buttons for denoise mode
+    this.fullDenoiseRadio = new RadioButton(this);
+    this.fullDenoiseRadio.text = "Full Denoise";
+    this.fullDenoiseRadio.checked = true;  // Default to Full Denoise
+this.fullDenoiseRadio.onCheck = function(checked) {
+    if (checked) {
+        SetiAstroDenoiseParameters.denoiseMode = "luminance";
+    }
+};
+
+    this.luminanceDenoiseRadio = new RadioButton(this);
+    this.luminanceDenoiseRadio.text = "Luminance Only";
+this.luminanceDenoiseRadio.onCheck = function(checked) {
+    if (checked) {
+        SetiAstroDenoiseParameters.denoiseMode = "full";
+    }
+};
+
+    this.denoiseModeSizer = new HorizontalSizer;
+    this.denoiseModeSizer.spacing = 4;
+    this.denoiseModeSizer.add(this.fullDenoiseRadio);
+    this.denoiseModeSizer.add(this.luminanceDenoiseRadio);
+
 
     // Linear state checkbox
     this.linearStateCheckbox = new CheckBox(this);
@@ -226,6 +250,8 @@ this.denoiseStrengthSlider.onValueUpdated = function(value) {
     this.sizer.add(this.imageSelectionSizer);
     this.sizer.spacing = 6;
     this.sizer.add(this.denoiseStrengthSlider);
+        this.sizer.add(this.denoiseModeSizer);
+        this.sizer.addStretch();
     this.sizer.add(this.linearStateCheckbox);
     this.sizer.addStretch();
 
@@ -324,7 +350,7 @@ function saveImageAsTiff(inputFolderPath, view) {
 
 
 // Create batch file to run the denoise process
-function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU) {
+function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU, denoiseMode) {
     let batchContent;
 
     // macOS/Linux shell script
@@ -334,14 +360,16 @@ function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU) {
         batchContent += 'osascript -e \'tell application "Terminal" to do script "' +
                         exePath + "/setiastrocosmicclarity_denoisemac " +  // Use the full path to the executable
                         '--denoise_strength ' + denoiseStrength.toFixed(2) + " " +
+                        '--denoise_mode ' + SetiAstroDenoiseParameters.denoiseMode + " " +  // Add the denoise mode to the command
                         (useGPU ? "" : "--disable_gpu") + '"\'\n';
     }
     // Windows script
     else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
         batchContent = "@echo off\n";
         batchContent += "cd /d \"" + exePath + "\"\n";
-        batchContent += "start setiastrocosmicclaritydenoise.exe " +
+        batchContent += "start setiastrocosmicclarity_denoise.exe " +
                         "--denoise_strength " + denoiseStrength.toFixed(2) + " " +
+                        "--denoise_mode " + SetiAstroDenoiseParameters.denoiseMode + " " +  // Add the denoise mode to the command
                         (useGPU ? "" : "--disable_gpu") + "\n";
     } else {
         console.criticalln("Unsupported platform: " + CoreApplication.platform);
@@ -361,6 +389,7 @@ function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU) {
 
     return true;
 }
+
 
 // Function to wait for the output file and handle the image processing
 function waitForFile(outputFilePath, timeoutSeconds = 120) {
@@ -471,7 +500,7 @@ if (dialog.execute()) {
         let inputFilePath = saveImageAsTiff(inputFolderPath, selectedView);
         let batchFilePath = SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath + pathSeparator + "run_setiastrocosmicclaritydenoise" + SCRIPT_EXT;
 
-        if (createBatchFile(batchFilePath, SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath, SetiAstroDenoiseParameters.denoiseStrength, SetiAstroDenoiseParameters.useGPU)) {
+        if (createBatchFile(batchFilePath, SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath, SetiAstroDenoiseParameters.denoiseStrength, SetiAstroDenoiseParameters.useGPU, SetiAstroDenoiseParameters.denoiseMode)) {
             let process = new ExternalProcess;
             try {
                 if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS" || CoreApplication.platform == "LINUX") {
