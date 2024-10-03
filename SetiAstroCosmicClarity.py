@@ -97,11 +97,20 @@ def load_models(exe_dir, use_gpu=True):
         "device": device
     }
 
-# Function to extract luminance (Y channel) from an RGB image
+# Function to extract luminance (Y channel) from an RGB image in 32-bit float precision
 def extract_luminance(image):
-    ycbcr_image = image.convert('YCbCr')
+    # Ensure the image is a NumPy array before processing
+    if isinstance(image, Image.Image):
+        image = np.array(image).astype(np.float32) / 255.0  # Convert to 32-bit float
+
+    # Convert RGB image to YCbCr and extract the Y channel (luminance)
+    ycbcr_image = Image.fromarray(np.clip(image * 255, 0, 255).astype(np.uint8)).convert('YCbCr')
     y, cb, cr = ycbcr_image.split()
+
+    # Convert Y back to 32-bit float
     return np.array(y).astype(np.float32) / 255.0, cb, cr
+
+
 
 # Function to show progress during chunk processing
 def show_progress(current, total):
@@ -110,10 +119,38 @@ def show_progress(current, total):
 
 # Function to merge the sharpened luminance (Y) with original chrominance (Cb and Cr) to reconstruct RGB image
 def merge_luminance(y_sharpened, cb, cr):
-    y_sharpened = np.clip(y_sharpened * 255, 0, 255).astype(np.uint8)
-    y_sharpened_img = Image.fromarray(y_sharpened)
-    ycbcr_image = Image.merge('YCbCr', (y_sharpened_img, cb, cr))
-    return ycbcr_image.convert('RGB')
+    # Ensure Y is clipped between 0 and 1, as we're working in 32-bit float precision
+    y_sharpened = np.clip(y_sharpened, 0.0, 1.0)
+
+    # Convert Cb and Cr from Pillow image objects to numpy arrays (if needed)
+    cb = np.array(cb).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
+    cr = np.array(cr).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
+
+    # Recreate the YCbCr image as a stack of 32-bit float arrays (Y, Cb, Cr)
+    ycbcr_image = np.stack([y_sharpened, cb, cr], axis=-1)
+
+    # Convert YCbCr to RGB while keeping everything in 32-bit float space
+    rgb_image = ycbcr_to_rgb(ycbcr_image)
+
+    return rgb_image
+
+# Helper function to convert YCbCr (32-bit float) to RGB
+def ycbcr_to_rgb(ycbcr_image):
+    # Conversion matrix for YCbCr to RGB (ITU-R BT.601 standard)
+    conversion_matrix = np.array([[1.0,  0.0, 1.402],
+                                  [1.0, -0.344136, -0.714136],
+                                  [1.0,  1.772, 0.0]])
+
+    # Normalize Cb and Cr from [0, 1] to [-0.5, 0.5] as required by YCbCr specification
+    ycbcr_image[:, :, 1:] -= 0.5
+
+    # Apply the YCbCr to RGB conversion matrix in 32-bit float
+    rgb_image = np.dot(ycbcr_image, conversion_matrix.T)
+
+    # Clip to ensure the RGB values stay within [0, 1] range
+    rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+    return rgb_image
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -219,8 +256,8 @@ def show_progress(current, total):
 # Function to show progress during chunk processing
 def show_progress(current, total):
     progress_percentage = (current / total) * 100
-    print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)")
-    sys.stdout.flush()  # Ensure the progress is flushed to the output immediately
+    # Use \r to overwrite the same line
+    print(f"\rProgress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='', flush=True)
 
 # Function to sharpen an image
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, device, models):
@@ -229,17 +266,23 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
     try:
         if file_extension in ['tif', 'tiff']:
+            # Load the TIFF image as a 32-bit float directly
             image = tiff.imread(image_path).astype(np.float32)
-            if len(image.shape) == 2:
-                image = np.stack([image]*3, axis=-1)
-            image = Image.fromarray((image * 255).astype(np.uint8))
+            if len(image.shape) == 2:  # Grayscale image
+                image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
         else:
-            image = Image.open(image_path).convert('RGB')
+            # For non-TIFF files, read and convert to 32-bit float for consistency
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
         return None
 
-    luminance, cb, cr = extract_luminance(image)
+    # Extract luminance (for color images) or handle grayscale images directly
+    if len(image.shape) == 3:
+        luminance, cb, cr = extract_luminance(Image.fromarray((image * 255).astype(np.uint8)))
+    else:
+        luminance = image
+
     chunks = split_image_into_chunks_with_overlap(luminance, chunk_size=256, overlap=64)
     total_chunks = len(chunks)
 
@@ -306,8 +349,13 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         # If only non-stellar, stitch the non-stellar sharpened image
         sharpened_luminance = nonstellar_sharpened
 
-    # Merge back the sharpened luminance with the original chrominance (Cb, Cr)
-    sharpened_image = merge_luminance(sharpened_luminance, cb, cr)
+    # For color images, merge back the luminance with the original chrominance (Cb, Cr)
+    if len(image.shape) == 3:
+        sharpened_image = merge_luminance(sharpened_luminance, cb, cr)
+    else:
+        # For grayscale images, the luminance is the image itself
+        sharpened_image = sharpened_luminance
+
     return sharpened_image
 
 # Main process for sharpening images
@@ -318,7 +366,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V2.1                       # 
+ *#              Cosmic Clarity - Sharpen V3.0                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -338,17 +386,21 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
         image_path = os.path.join(input_dir, image_name)
         sharpened_image = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, models['device'], models)
 
-        if sharpened_image:
+        if sharpened_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
             if file_extension in ['.tif', '.tiff']:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.tif")
-                sharpened_image_np = np.array(sharpened_image).astype(np.float32) / 255.0
-                tiff.imwrite(output_image_path, sharpened_image_np, dtype=np.float32)
+                # Save the sharpened image as 32-bit TIFF
+                tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
+                print(f"Saved 32-bit sharpened image to: {output_image_path}")
             else:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.png")
-                sharpened_image.save(output_image_path)
+                sharpened_image_8bit = (sharpened_image * 255).astype(np.uint8)
+                sharpened_image_pil = Image.fromarray(sharpened_image_8bit)
+                sharpened_image_pil.save(output_image_path)
 
             print(f"Saved sharpened image to: {output_image_path}")
+
 
 # Define input and output directories for PyInstaller
 input_dir = os.path.join(exe_dir, 'input')
