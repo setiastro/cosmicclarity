@@ -72,21 +72,35 @@ def load_model(exe_dir, use_gpu=True):
 
 # Function to extract Y, Cb, Cr channels from an RGB image
 def extract_ycbcr(image):
+    # Convert numpy array to Pillow Image object if necessary
+    if isinstance(image, np.ndarray):
+        image = Image.fromarray(image.astype(np.uint8))  # No need to multiply by 255 again
+
+    # Convert to YCbCr color space
     ycbcr_image = image.convert('YCbCr')
     y, cb, cr = ycbcr_image.split()
-    return np.array(y).astype(np.float32) / 255.0, np.array(cb).astype(np.float32) / 255.0, np.array(cr).astype(np.float32) / 255.0
 
-# Function to merge the denoised Y, Cb, Cr channels back to an RGB image
+    # Return Y, Cb, Cr channels as numpy arrays, scaled to [0, 1]
+    return np.array(y).astype(np.float32), np.array(cb).astype(np.float32), np.array(cr).astype(np.float32)
+
+
+# Function to merge the denoised Y, Cb, Cr channels back to an RGB image, maintaining precision
 def merge_ycbcr(y_denoised, cb, cr):
-    y_denoised = np.clip(y_denoised * 255, 0, 255).astype(np.uint8)
-    cb = np.clip(cb * 255, 0, 255).astype(np.uint8)
-    cr = np.clip(cr * 255, 0, 255).astype(np.uint8)
+    # Ensure Y, Cb, and Cr channels are clipped between 0 and 255
+    y_denoised = np.clip(y_denoised, 0, 255)
+    cb = np.clip(cb, 0, 255)
+    cr = np.clip(cr, 0, 255)
 
-    y_denoised_img = Image.fromarray(y_denoised)
-    cb_img = Image.fromarray(cb)
-    cr_img = Image.fromarray(cr)
+    # Convert back to uint8 for Pillow processing, but this should happen only at the final step
+    y_denoised_img = Image.fromarray(y_denoised.astype(np.uint8))
+    cb_img = Image.fromarray(cb.astype(np.uint8))
+    cr_img = Image.fromarray(cr.astype(np.uint8))
+
+    # Merge and convert back to RGB
     ycbcr_image = Image.merge('YCbCr', (y_denoised_img, cb_img, cr_img))
     return ycbcr_image.convert('RGB')
+
+
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -188,42 +202,39 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
 
     try:
         if file_extension in ['tif', 'tiff']:
+            # Load the image as 32-bit float directly
             image = tiff.imread(image_path).astype(np.float32)
 
-            # Check if image is grayscale (mono) or color
+            # Check if the image is grayscale (mono) or color
             if len(image.shape) == 2:  # Grayscale image
-                print("Detected grayscale (mono) image. Forcing luminance denoise mode.")
-                denoise_mode = 'luminance'  # Force luminance mode for grayscale images
-                image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
+                print("Detected grayscale (mono) image. Denoising single channel directly.")
+                denoised_image = denoise_channel(image, device, model)  # Directly denoise the single channel
+                return denoised_image  # Return the denoised single channel image
             else:
                 print("Detected color image.")
-            image = Image.fromarray((image * 255).astype(np.uint8))  # Convert float32 TIFF to uint8 image for PIL
-
         else:
-            image = Image.open(image_path).convert('RGB')  # Convert to RGB for PIL handling
+            # For non-TIFF files, read and convert to 32-bit float for consistency
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32)
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
         return None
 
     if denoise_mode == 'luminance':
         print("Denoising Luminance (Y) channel only...")
-        # Convert image to YCbCr, denoise Y channel (luminance)
+        # Split into YCbCr and denoise the Y channel (luminance)
         y, cb, cr = extract_ycbcr(image)
         denoised_y = denoise_channel(y, device, model)
-        denoised_image = merge_ycbcr(denoised_y, cb, cr)
+        denoised_image = merge_ycbcr(denoised_y, cb, cr)  # Recombine channels for RGB
     else:
         print("Denoising full RGB channels (R, G, B)...")
-        # Split image into R, G, and B channels and denoise each separately
-        r, g, b = image.split()  # Split image into R, G, and B channels
-        denoised_r = denoise_channel(np.array(r).astype(np.float32) / 255.0, device, model)
-        denoised_g = denoise_channel(np.array(g).astype(np.float32) / 255.0, device, model)
-        denoised_b = denoise_channel(np.array(b).astype(np.float32) / 255.0, device, model)
+        # Split image into R, G, B channels and denoise each separately
+        r, g, b = image[:, :, 0], image[:, :, 1], image[:, :, 2]  # Split into R, G, B
+        denoised_r = denoise_channel(r, device, model)
+        denoised_g = denoise_channel(g, device, model)
+        denoised_b = denoise_channel(b, device, model)
 
-        # Merge the denoised R, G, and B channels back into an RGB image
-        denoised_r = np.clip(denoised_r * 255, 0, 255).astype(np.uint8)
-        denoised_g = np.clip(denoised_g * 255, 0, 255).astype(np.uint8)
-        denoised_b = np.clip(denoised_b * 255, 0, 255).astype(np.uint8)
-        denoised_image = Image.merge('RGB', (Image.fromarray(denoised_r), Image.fromarray(denoised_g), Image.fromarray(denoised_b)))
+        # Merge the denoised R, G, B channels back into an RGB image
+        denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
 
     return denoised_image
 
@@ -260,7 +271,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V1.0                       # 
+ *#              Cosmic Clarity - Denoise V2.0                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -271,26 +282,34 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
         # Prompt for user input
         use_gpu, denoise_strength, denoise_mode = get_user_input()
 
+    # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    # Load the denoise model
     models = load_model(exe_dir, use_gpu)
 
+    # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
         denoised_image = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
 
-        if denoised_image:
+        if denoised_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
-            if file_extension in ['.tif', '.tiff']:
-                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_denoised.tif")
-                denoised_image_np = np.array(denoised_image).astype(np.float32) / 255.0
-                tiff.imwrite(output_image_path, denoised_image_np, dtype=np.float32)
-            else:
-                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_denoised.png")
-                denoised_image.save(output_image_path)
+            output_image_name = os.path.splitext(image_name)[0] + "_denoised.tif"
+            output_image_path = os.path.join(output_dir, output_image_name)
 
-            print(f"Saved denoised image to: {output_image_path}")
+            if file_extension in ['.tif', '.tiff']:
+                # Directly save as 32-bit TIFF without scaling or conversions
+                tiff.imwrite(output_image_path, denoised_image.astype(np.float32), dtype=np.float32)
+                print(f"Saved 32-bit denoised image to: {output_image_path}")
+            else:
+                # Handle non-TIFF formats, which may require conversion to 8-bit
+                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_denoised.png")
+                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)  # Convert to 8-bit for PNG
+                denoised_image_pil = Image.fromarray(denoised_image_8bit)
+                denoised_image_pil.save(output_image_path)
+                print(f"Saved 8-bit denoised image to: {output_image_path}")
 
 # Define input and output directories
 input_dir = os.path.join(exe_dir, 'input')
