@@ -6,19 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.01.2024_3.zip" sha1="9fbc484146d1859b30b102c13ff78f2a4d10eee2" type="script" releaseDate="20241001">
+      <package fileName="SetiAstroCosmicClarity10.03.2024.zip" sha1="4210746ba572833d213d9e231d376d74e0d56668" type="script" releaseDate="20241003">
          <title>
         Cosmic Clarity - Denoise and Sharpen
       </title>
          <description>
             <p>
-Cosmic Clarity is now in two parts.  Cosmic Clarity - Sharpen and Cosmic Clarity - Denoise.  Denoise was trained to fill in the noise reduction gap where mono images weren&apos;t supported in other denoising programs like DeepSNR.  Cosmic Clarity - Denoise can be used on Mono or Color images and do a full denoising or just denoise the Luminance layer.  Please visit my website to get the latest Cosmic Clarity program for Windows or MacOS.  www.setiastro.com
-		</p>
-            <p>
-Fixed issue on Mac where the denoise mode was stuck on Full in the execution
+Cosmic Clarity now supports Linux.  Added improvement to show the terminal on MacOS for Cosmic Clarity - Sharpening.  GPU acceleration functional for all platforms.  Please visit my website to get the latest Cosmic Clarity program for Windows, MacOS, or Linux.  www.setiastro.com
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-01T18:44:27.790Z" encoding="Base64">eUHuYt+dGl4reqrYJpr8xWKdTYo1Gg3lnc9bZokPcBGA1puxfPaLpxNFuJA99lP6hYUyrK+cyevTP42PKMfLCw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-03T12:02:59.902Z" encoding="Base64">M0tqPGeKaYuJrg28JWGT/l9X71zCKNrbDqYqDD22Uj0coaqyUJASnlSI5W+X5Lxrt9FDhHN1vk9cVlEYTCrRDQ==</Signature>
