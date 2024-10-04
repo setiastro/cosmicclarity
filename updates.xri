@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.03.2024.zip" sha1="4210746ba572833d213d9e231d376d74e0d56668" type="script" releaseDate="20241003">
+      <package fileName="SetiAstroCosmicClarity10.04.2024.zip" sha1="775de0bbed63851bf6d6a53fb097523748d29d8a" type="script" releaseDate="20241004">
          <title>
         Cosmic Clarity - Denoise and Sharpen
       </title>
          <description>
             <p>
-Cosmic Clarity now supports Linux.  Added improvement to show the terminal on MacOS for Cosmic Clarity - Sharpening.  GPU acceleration functional for all platforms.  Please visit my website to get the latest Cosmic Clarity program for Windows, MacOS, or Linux.  www.setiastro.com
+Updated to correctly revert back to the original linear state with no offsets.  Please visit my website to get the latest Cosmic Clarity program for Windows, MacOS, or Linux.  www.setiastro.com
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-03T12:02:59.902Z" encoding="Base64">M0tqPGeKaYuJrg28JWGT/l9X71zCKNrbDqYqDD22Uj0coaqyUJASnlSI5W+X5Lxrt9FDhHN1vk9cVlEYTCrRDQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-04T23:17:41.031Z" encoding="Base64">wMyF5mrLiUNdQPop1fAZxNcks5feX3Vn7iksdSVUza+kWKCmN6DuHoGzxlnxB+1sgx1JlteZovE8W3YOJMckAg==</Signature>
