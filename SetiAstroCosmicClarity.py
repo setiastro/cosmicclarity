@@ -259,7 +259,27 @@ def show_progress(current, total):
     # Use \r to overwrite the same line
     print(f"\rProgress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='', flush=True)
 
-# Function to sharpen an image
+# Function to replace the 5-pixel border from the original image into the processed image
+def replace_border(original_image, processed_image, border_size=5):
+    # Ensure the dimensions of both images match
+    if original_image.shape != processed_image.shape:
+        raise ValueError("Original image and processed image must have the same dimensions.")
+    
+    # Replace the top border
+    processed_image[:border_size, :] = original_image[:border_size, :]
+    
+    # Replace the bottom border
+    processed_image[-border_size:, :] = original_image[-border_size:, :]
+    
+    # Replace the left border
+    processed_image[:, :border_size] = original_image[:, :border_size]
+    
+    # Replace the right border
+    processed_image[:, -border_size:] = original_image[:, -border_size:]
+
+    return processed_image
+
+
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, device, models):
     image = None
     file_extension = image_path.lower().split('.')[-1]
@@ -356,9 +376,14 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         # For grayscale images, the luminance is the image itself
         sharpened_image = sharpened_luminance
 
+    # Replace the 5-pixel border from the original image
+    sharpened_image = replace_border(image, sharpened_image)
+
     return sharpened_image
 
-# Main process for sharpening images
+
+
+
 def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_strength=None, stellar_amount=None, use_gpu=True):
     print((r"""
  *#        ___     __      ___       __                              #
@@ -366,7 +391,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V3.0                       # 
+ *#              Cosmic Clarity - Sharpen V3.1                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -388,18 +413,37 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
 
         if sharpened_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
+
+            # Check if the original image was grayscale
+            original_image = tiff.imread(image_path).astype(np.float32)
+            is_grayscale = len(original_image.shape) == 2
+
             if file_extension in ['.tif', '.tiff']:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.tif")
-                # Save the sharpened image as 32-bit TIFF
-                tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
+                
+                if is_grayscale:
+                    # Save only the first channel (grayscale)
+                    tiff.imwrite(output_image_path, sharpened_image[:, :, 0].astype(np.float32))
+                else:
+                    # Save the sharpened image as 32-bit TIFF (RGB)
+                    tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
+                    
                 print(f"Saved 32-bit sharpened image to: {output_image_path}")
             else:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.png")
-                sharpened_image_8bit = (sharpened_image * 255).astype(np.uint8)
-                sharpened_image_pil = Image.fromarray(sharpened_image_8bit)
+                
+                if is_grayscale:
+                    # Save only the first channel (grayscale)
+                    sharpened_image_8bit = (sharpened_image[:, :, 0] * 255).astype(np.uint8)
+                    sharpened_image_pil = Image.fromarray(sharpened_image_8bit, mode='L')  # L mode for grayscale
+                else:
+                    sharpened_image_8bit = (sharpened_image * 255).astype(np.uint8)
+                    sharpened_image_pil = Image.fromarray(sharpened_image_8bit)
+                
                 sharpened_image_pil.save(output_image_path)
 
             print(f"Saved sharpened image to: {output_image_path}")
+
 
 
 # Define input and output directories for PyInstaller
