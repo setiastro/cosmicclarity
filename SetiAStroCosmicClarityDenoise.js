@@ -1,529 +1,363 @@
-#feature-id CosmicClarity : SetiAstro > Cosmic Clarity - Denoise
-#feature-info This script works with Seti Astro Cosmic Clarity program to denoise images
+import warnings
+import os
+import sys
+import torch
+import numpy as np
+import torch.nn as nn
+import tifffile as tiff
+from PIL import Image
+import tkinter as tk
+from tkinter import simpledialog, messagebox
+import argparse  # For command-line argument parsing
 
-/******************************************************************************
- *######################################################################
- *#        ___     __      ___       __                                #
- *#       / __/___/ /__   / _ | ___ / /________                        #
- *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                       #
- *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                       #
- *#                                                                    #
- *######################################################################
- *
- * Cosmic Clarity - Denoise
- * Version: V1.0
- * Author: Franklin Marek
- * Website: www.setiastro.com
- *
- * This script works with Seti Astro Cosmic Clarity Denoise program to reduce noise in images.
- *
- * This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.
- ******************************************************************************/
+# Suppress model loading warnings
+warnings.filterwarnings("ignore")
 
-#include <pjsr/StdButton.jsh>
-#include <pjsr/StdIcon.jsh>
-#include <pjsr/StdCursor.jsh>
-#include <pjsr/Sizer.jsh>
-#include <pjsr/FrameStyle.jsh>
-#include <pjsr/NumericControl.jsh>
-#include <pjsr/FileMode.jsh>
-#include <pjsr/DataType.jsh>
-#include <pjsr/ImageOp.jsh>
-#include <pjsr/SampleType.jsh>
-#include <pjsr/UndoFlag.jsh>
-#include <pjsr/TextAlign.jsh>
-#include <pjsr/FontFamily.jsh>
-#include <pjsr/ColorSpace.jsh>
+# Define the DenoiseCNN model with adjusted convolutional layers
+class DenoiseCNN(nn.Module):
+    def __init__(self):
+        super(DenoiseCNN, self).__init__()
+        
+        # Encoder (down-sampling path)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 3rd layer (32 -> 64 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 5th layer (128 -> 256 feature maps)
+            nn.ReLU()
+        )
+        
+        # Decoder (up-sampling path)
+        self.decoder = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 1st deconvolutional layer (256 -> 128 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 2nd deconvolutional layer (128 -> 64 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 3rd deconvolutional layer (64 -> 32 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 4th deconvolutional layer (32 -> 16 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
+            nn.Sigmoid()  # Ensure output values are between 0 and 1
+        )
 
-#define VERSION "v1.0"
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
 
-// Determine platform and appropriate command/shell setup
-let CMD_EXEC, SCRIPT_EXT;
-if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS" || CoreApplication.platform == "LINUX") {
-    CMD_EXEC = "/bin/sh";
-    SCRIPT_EXT = ".sh";
-} else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
-    CMD_EXEC = "cmd.exe";
-    SCRIPT_EXT = ".bat";
-} else {
-    console.criticalln("Unsupported platform: " + CoreApplication.platform);
-}
+# Get the directory of the executable or the script location
+exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
-// Define platform-agnostic folder paths
-let pathSeparator = (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") ? "\\" : "/";
-let scriptTempDir = File.systemTempDirectory + pathSeparator + "SetiAstroCosmicClarityDenoise";
-let setiAstroDenoiseConfigFile = scriptTempDir + pathSeparator + "setiastrocosmicclaritydenoise_config.csv";
+# Function to initialize and load the denoise model
+def load_model(exe_dir, use_gpu=True):
+    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-// Ensure the temp directory exists
-if (!File.directoryExists(scriptTempDir)) {
-    File.createDirectory(scriptTempDir);
-}
+    denoise_model = DenoiseCNN()
+    denoise_model.load_state_dict(torch.load(os.path.join(exe_dir, 'denoise_cnn.pth'), map_location=device))
 
-// Define global parameters
-var SetiAstroDenoiseParameters = {
-    targetView: undefined,
-    isLinear: false,
-    denoiseStrength: 0.9,  // Default denoise strength
-    setiAstroDenoiseParentFolderPath: "",
-    useGPU: true,
-    denoiseMode: "full",  // Default mode set to 'luminance'
+    denoise_model.eval()
+    denoise_model.to(device)
 
-    save: function() {
-        Parameters.set("isLinear", this.isLinear);
-        Parameters.set("useGPU", this.useGPU);
-        Parameters.set("setiAstroDenoiseParentFolderPath", this.setiAstroDenoiseParentFolderPath);
-        Parameters.set("denoiseStrength", this.denoiseStrength);
-        Parameters.set("denoiseMode", this.denoiseMode);  // Save denoiseMode
-        this.savePathToFile();
-    },
-
-    load: function() {
-        if (Parameters.has("isLinear"))
-            this.isLinear = Parameters.getBoolean("isLinear");
-        if (Parameters.has("useGPU"))
-            this.useGPU = Parameters.getBoolean("useGPU");
-        if (Parameters.has("setiAstroDenoiseParentFolderPath"))
-            this.setiAstroDenoiseParentFolderPath = Parameters.getString("setiAstroDenoiseParentFolderPath");
-        if (Parameters.has("denoiseStrength"))
-            this.denoiseStrength = Parameters.getReal("denoiseStrength");
-        if (Parameters.has("denoiseMode"))
-            this.denoiseMode = Parameters.getString("denoiseMode");  // Load denoiseMode
-        this.loadPathFromFile();
-    },
-    savePathToFile: function() {
-        try {
-            let file = new File;
-            file.createForWriting(setiAstroDenoiseConfigFile);
-            file.outTextLn(this.setiAstroDenoiseParentFolderPath);
-            file.close();
-        } catch (error) {
-            console.warningln("Failed to save SetiAstroDenoise parent folder path: " + error.message);
-        }
-    },
-
-    loadPathFromFile: function() {
-        try {
-            if (File.exists(setiAstroDenoiseConfigFile)) {
-                let file = new File;
-                file.openForReading(setiAstroDenoiseConfigFile);
-                let lines = File.readLines(setiAstroDenoiseConfigFile);
-                if (lines.length > 0) {
-                    this.setiAstroDenoiseParentFolderPath = lines[0].trim();
-                }
-                file.close();
-            }
-        } catch (error) {
-            console.warningln("Failed to load SetiAstroDenoise parent folder path: " + error.message);
-        }
-    }
-};
-
-// Dialog setup, image selection, denoise strength slider, etc.
-function SetiAstroDenoiseDialog() {
-    this.__base__ = Dialog;
-    this.__base__();
-
-    console.hide();
-    SetiAstroDenoiseParameters.load();
-
-    this.title = new Label(this);
-    this.title.text = "SetiAstroCosmicClarityDenoise " + VERSION;
-    this.title.textAlignment = TextAlign_Center;
-
-    this.description = new TextBox(this);
-    this.description.readOnly = true;
-    this.description.text = "This script integrates with SetiAstroCosmicClarityDenoise for noise reduction.\n" +
-                            "It saves the current image, runs the SetiAstroCosmicClarityDenoise tool, and replaces " +
-                            "the image with the denoised version.";
-    this.description.setMinWidth(400);
-
-    this.imageSelectionLabel = new Label(this);
-    this.imageSelectionLabel.text = "Select Image:";
-    this.imageSelectionLabel.textAlignment = TextAlign_Right | TextAlign_VertCenter;
-
-    this.imageSelectionDropdown = new ComboBox(this);
-    this.imageSelectionDropdown.editEnabled = false;
-
-    let windows = ImageWindow.windows;
-    let activeWindowId = ImageWindow.activeWindow.mainView.id;
-    for (let i = 0; i < windows.length; ++i) {
-        this.imageSelectionDropdown.addItem(windows[i].mainView.id);
-        if (windows[i].mainView.id === activeWindowId) {
-            this.imageSelectionDropdown.currentItem = i;
-        }
+    return {
+        "denoise_model": denoise_model,
+        "device": device
     }
 
-    this.imageSelectionSizer = new HorizontalSizer;
-    this.imageSelectionSizer.spacing = 4;
-    this.imageSelectionSizer.add(this.imageSelectionLabel);
-    this.imageSelectionSizer.add(this.imageSelectionDropdown, 100);
+# Function to extract Y, Cb, Cr channels from an RGB image
+def extract_ycbcr(image):
+    # Convert numpy array to Pillow Image object if necessary
+    if isinstance(image, np.ndarray):
+        image = Image.fromarray(image.astype(np.uint8))  # No need to multiply by 255 again
 
-// Denoise Strength slider
-this.denoiseStrengthSlider = new NumericControl(this);
-this.denoiseStrengthSlider.label.text = "Noise Reduction Strength:";
-this.denoiseStrengthSlider.setRange(0, 1);  // Updated range between 0 and 1
-this.denoiseStrengthSlider.setValue(SetiAstroDenoiseParameters.denoiseStrength);
-this.denoiseStrengthSlider.setPrecision(2);  // Keeping 2 decimal places for precision
-this.denoiseStrengthSlider.onValueUpdated = function(value) {
-    SetiAstroDenoiseParameters.denoiseStrength = value;
-};
+    # Convert to YCbCr color space
+    ycbcr_image = image.convert('YCbCr')
+    y, cb, cr = ycbcr_image.split()
 
-    // Radio buttons for denoise mode
-    this.fullDenoiseRadio = new RadioButton(this);
-    this.fullDenoiseRadio.text = "Full Denoise";
-    this.fullDenoiseRadio.checked = true;  // Default to Full Denoise
-this.fullDenoiseRadio.onCheck = function(checked) {
-    if (checked) {
-        SetiAstroDenoiseParameters.denoiseMode = "luminance";
-    }
-};
-
-    this.luminanceDenoiseRadio = new RadioButton(this);
-    this.luminanceDenoiseRadio.text = "Luminance Only";
-this.luminanceDenoiseRadio.onCheck = function(checked) {
-    if (checked) {
-        SetiAstroDenoiseParameters.denoiseMode = "full";
-    }
-};
-
-    this.denoiseModeSizer = new HorizontalSizer;
-    this.denoiseModeSizer.spacing = 4;
-    this.denoiseModeSizer.add(this.fullDenoiseRadio);
-    this.denoiseModeSizer.add(this.luminanceDenoiseRadio);
+    # Return Y, Cb, Cr channels as numpy arrays, scaled to [0, 1]
+    return np.array(y).astype(np.float32), np.array(cb).astype(np.float32), np.array(cr).astype(np.float32)
 
 
-    // Linear state checkbox
-    this.linearStateCheckbox = new CheckBox(this);
-    this.linearStateCheckbox.text = "Image is in Linear State";
-    this.linearStateCheckbox.checked = SetiAstroDenoiseParameters.isLinear;
-    this.linearStateCheckbox.onCheck = function(checked) {
-        SetiAstroDenoiseParameters.isLinear = checked;
-        SetiAstroDenoiseParameters.save();
-    };
+# Function to merge the denoised Y, Cb, Cr channels back to an RGB image, maintaining precision
+def merge_ycbcr(y_denoised, cb, cr):
+    # Ensure Y, Cb, and Cr channels are clipped between 0 and 255
+    y_denoised = np.clip(y_denoised, 0, 255)
+    cb = np.clip(cb, 0, 255)
+    cr = np.clip(cr, 0, 255)
 
-    // Wrench Icon Button for setting the SetiAstroDenoise parent folder path
-    this.setupButton = new ToolButton(this);
-    this.setupButton.icon = this.scaledResource(":/icons/wrench.png");
-    this.setupButton.setScaledFixedSize(24, 24);
-    this.setupButton.onClick = function() {
-        let pathDialog = new GetDirectoryDialog;
-        pathDialog.initialPath = SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath;
-        if (pathDialog.execute()) {
-            SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath = pathDialog.directory;
-            SetiAstroDenoiseParameters.save();
-        }
-    };
+    # Convert back to uint8 for Pillow processing, but this should happen only at the final step
+    y_denoised_img = Image.fromarray(y_denoised.astype(np.uint8))
+    cb_img = Image.fromarray(cb.astype(np.uint8))
+    cr_img = Image.fromarray(cr.astype(np.uint8))
 
-    this.okButton = new PushButton(this);
-    this.okButton.text = "OK";
-    this.okButton.onClick = () => this.ok();
-
-    this.cancelButton = new PushButton(this);
-    this.cancelButton.text = "Cancel";
-    this.cancelButton.onClick = () => this.cancel();
-
-    // New Instance button
-    this.newInstanceButton = new ToolButton(this);
-    this.newInstanceButton.icon = this.scaledResource(":/process-interface/new-instance.png");
-    this.newInstanceButton.setScaledFixedSize(24, 24);
-    this.newInstanceButton.toolTip = "Save a new instance of this script";
-    this.newInstanceButton.onMousePress = function() {
-        this.dialog.newInstance();
-    }.bind(this);
-
-    this.buttonsSizer = new HorizontalSizer;
-    this.buttonsSizer.spacing = 6;
-    this.buttonsSizer.add(this.newInstanceButton);
-    this.buttonsSizer.addStretch();
-    this.buttonsSizer.add(this.okButton);
-    this.buttonsSizer.add(this.cancelButton);
-    this.buttonsSizer.addStretch();
-
-    // Layout
-    this.sizer = new VerticalSizer;
-    this.sizer.margin = 6;
-    this.sizer.spacing = 6;
-    this.sizer.addStretch();
-    this.sizer.add(this.title);
-    this.sizer.add(this.description);
-    this.sizer.addStretch();
-    this.sizer.add(this.imageSelectionSizer);
-    this.sizer.spacing = 6;
-    this.sizer.add(this.denoiseStrengthSlider);
-        this.sizer.add(this.denoiseModeSizer);
-        this.sizer.addStretch();
-    this.sizer.add(this.linearStateCheckbox);
-    this.sizer.addStretch();
-
-    // GPU Acceleration checkbox (only for Windows)
-
-        this.gpuAccelerationCheckbox = new CheckBox(this);
-        this.gpuAccelerationCheckbox.text = "Enable GPU Acceleration";
-        this.gpuAccelerationCheckbox.checked = true;  // Default to enabled
-        this.gpuAccelerationCheckbox.onCheck = function(checked) {
-            SetiAstroDenoiseParameters.useGPU = checked;
-        };
-        this.sizer.add(this.gpuAccelerationCheckbox);
+    # Merge and convert back to RGB
+    ycbcr_image = Image.merge('YCbCr', (y_denoised_img, cb_img, cr_img))
+    return ycbcr_image.convert('RGB')
 
 
-    this.sizer.add(this.setupButton);
-    this.sizer.addSpacing(12);
-    this.sizer.add(this.buttonsSizer);
 
-    this.windowTitle = "SetiAstroCosmicClarity Script";
-    this.adjustToContents();
+# Function to split an image into chunks with overlap
+def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
+    height, width = image.shape
+    chunks = []
+    step_size = chunk_size - overlap  # Define how much to step over (overlapping area)
 
+    for i in range(0, height, step_size):
+        for j in range(0, width, step_size):
+            end_i = min(i + chunk_size, height)
+            end_j = min(j + chunk_size, width)
+            chunk = image[i:end_i, j:end_j]
+            chunks.append((chunk, i, j))  # Return chunk and its position
+    return chunks
 
-}
-SetiAstroDenoiseDialog.prototype = new Dialog;
+# Soft blending weights for the overlap area
+def generate_blend_weights(chunk_size, overlap):
+    ramp = np.linspace(0, 1, overlap)
+    flat = np.ones(chunk_size - 2 * overlap)
+    blend_vector = np.concatenate([ramp, flat, ramp[::-1]])  # Create smooth transition
+    blend_matrix = np.outer(blend_vector, blend_vector)  # 2D blending weights
+    return blend_matrix
 
-function saveImageAsTiff(inputFolderPath, view) {
-    // Apply full unlinked stretch if the image is in a linear state
-    if (SetiAstroDenoiseParameters.isLinear) {
-        console.writeln("Image is in linear state, applying full unlinked stretch.");
+# Function to stitch overlapping chunks back together with soft blending while ignoring borders for all chunks
+def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=5):
+    stitched_image = np.zeros(image_shape, dtype=np.float32)
+    weight_map = np.zeros(image_shape, dtype=np.float32)  # Track blending weights
+    
+    for chunk, i, j in chunks:
+        actual_chunk_h, actual_chunk_w = chunk.shape
+        
+        # Calculate the boundaries for the current chunk, ignoring the border
+        border_h = min(border_size, actual_chunk_h // 2)
+        border_w = min(border_size, actual_chunk_w // 2)
 
-        let imageMin = view.mainView.image.minimum();
-        let imageMedian = view.mainView.image.median();
-        SetiAstroDenoiseParameters.originalMin = imageMin;
-        SetiAstroDenoiseParameters.originalMedian = imageMedian;
-        let targetMedian = 0.25; // Target for the second stretch operation
+        # Always ignore the 5-pixel border for all chunks, including edges
+        inner_chunk = chunk[border_h:actual_chunk_h-border_h, border_w:actual_chunk_w-border_w]
+        stitched_image[i+border_h:i+actual_chunk_h-border_h, j+border_w:j+actual_chunk_w-border_w] += inner_chunk
+        weight_map[i+border_h:i+actual_chunk_h-border_h, j+border_w:j+actual_chunk_w-border_w] += 1
 
-        // First PixelMath operation: ($T-min($T))/(1-min($T))
-        let pixelMath1 = new PixelMath;
-        if (view.mainView.image.numberOfChannels === 1) {
-            pixelMath1.expression = "$T-min($T)";
-        } else {
-            pixelMath1.expression = "MedColor=avg(med($T[0]),med($T[1]),med($T[2]));\n" +
-                                    "MinColor=min(min($T[0]),min($T[1]),min($T[2]));\n" +
-                                    "SDevColor=avg(sdev($T[0]),sdev($T[1]),sdev($T[2]));\n" +
-                                    "BlackPoint = MinColor;\n" +
-                                    "Rescaled = ($T - BlackPoint);";
-            pixelMath1.symbols = "BlackPoint, Rescaled, MedColor, MinColor, SDevColor";
-        }
-        pixelMath1.useSingleExpression = true;
-        pixelMath1.executeOn(view.mainView);
+    # Normalize by weight_map to blend overlapping areas
+    stitched_image /= np.maximum(weight_map, 1)  # Avoid division by zero
+    return stitched_image
 
-        // Second PixelMath operation: ((Med($T)-1)*0.25*$T)/(Med($T)*(0.25+$T-1)-0.25*$T)
-        let pixelMath2 = new PixelMath;
-        if (view.mainView.image.numberOfChannels === 1) {
-            pixelMath2.expression = "((Med($T)-1)*" + targetMedian + "*$T)/(Med($T)*(0.25+$T-1)-0.25*$T)";
-        } else {
-            pixelMath2.expression = "MedianColor = avg(Med($T[0]),Med($T[1]),Med($T[2]));\n" +
-                                    "((MedianColor-1)*" + targetMedian + "*$T)/(MedianColor*(" + targetMedian + "+$T-1)-" + targetMedian + "*$T)";
-            pixelMath2.symbols = "MedianColor";
-        }
-        pixelMath2.useSingleExpression = true;
-        pixelMath2.executeOn(view.mainView);
-    }
+# Function to blend two images (before and after)
+def blend_images(before, after, amount):
+    return (1 - amount) * before + amount * after
 
-    // Save the stretched image as a 32-bit TIFF
-    let filePath = inputFolderPath + pathSeparator + view.mainView.id + ".tiff";
-    let F = new FileFormat("TIFF", false, true);
-    if (F.isNull)
-        throw new Error("TIFF format not supported");
+# Function to get user input for denoise strength (Interactive)
+def get_user_input():
+    root = tk.Tk()
+    root.withdraw()
 
-    let f = new FileFormatInstance(F);
-    if (f.isNull)
-        throw new Error("Unable to create FileFormatInstance for TIFF");
+    # Ask user if they want to disable GPU acceleration
+    use_gpu = messagebox.askyesno("GPU Acceleration", "Do you want to use GPU acceleration? (Yes: Enable GPU, No: Use CPU)")
 
-    let description = new ImageDescription();
-    description.bitsPerSample = 32;
-    description.ieeefpSampleFormat = true;
+    denoise_strength = simpledialog.askfloat("Denoise Strength", "Enter denoise strength (0-1):", initialvalue=0.9, minvalue=0, maxvalue=1)
 
-    if (!f.create(filePath, "compression=none")) {
-        throw new Error("Unable to create file: " + filePath);
-    }
+    # Ask user for denoise mode (luminance or full)
+    denoise_mode = messagebox.askquestion("Denoise Mode", "Do you want full YCbCr denoise? (Yes: Full denoise, No: Luminance only)") 
+    denoise_mode = "full" if denoise_mode == "yes" else "luminance"
 
-    if (!f.setOptions(description)) {
-        throw new Error("Unable to set image options for 32-bit IEEE floating point.");
-    }
+    root.destroy()
 
-    let img = view.mainView.image;
-    if (!f.writeImage(img)) {
-        throw new Error("Failed to write image: " + filePath);
-    }
+    return use_gpu, denoise_strength, denoise_mode
 
-    f.close();
-    console.writeln("Image saved as 32-bit TIFF: " + filePath);
-    return filePath;
-}
+# Function to show progress during chunk processing
+def show_progress(current, total):
+    progress_percentage = (current / total) * 100
+    print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r', flush=True)
 
+# Function to denoise a channel (Y, Cb, Cr)
+def denoise_channel(channel, device, model):
+    # Split channel into chunks
+    chunk_size = 256
+    overlap = 64
+    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
 
-// Create batch file to run the denoise process
-function createBatchFile(batchFilePath, exePath, denoiseStrength, useGPU, denoiseMode) {
-    let batchContent;
+    denoised_chunks = []
 
-    // macOS/Linux shell script
-    if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS") {
-        batchContent = "#!/bin/sh\n";
-        batchContent += "cd \"" + exePath + "\"\n";
-        batchContent += 'osascript -e \'tell application "Terminal" to do script "' +
-                        exePath + "/setiastrocosmicclarity_denoisemac " +  // Use the full path to the executable
-                        '--denoise_strength ' + denoiseStrength.toFixed(2) + " " +
-                        '--denoise_mode ' + SetiAstroDenoiseParameters.denoiseMode + " " +  // Add the denoise mode to the command
-                        (useGPU ? "" : "--disable_gpu") + '"\'\n';
-    }
-    // Windows script
-    else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
-        batchContent = "@echo off\n";
-        batchContent += "cd /d \"" + exePath + "\"\n";
-        batchContent += "start setiastrocosmicclarity_denoise.exe " +
-                        "--denoise_strength " + denoiseStrength.toFixed(2) + " " +
-                        "--denoise_mode " + SetiAstroDenoiseParameters.denoiseMode + " " +  // Add the denoise mode to the command
-                        (useGPU ? "" : "--disable_gpu") + "\n";
-    } else {
-        console.criticalln("Unsupported platform: " + CoreApplication.platform);
-        return false;
-    }
+    # Apply denoise model to each chunk
+    for idx, (chunk, i, j) in enumerate(chunks):
+        chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+        with torch.no_grad():
+            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+        denoised_chunks.append((denoised_chunk, i, j))
 
-    // Write the script to the specified path
-    try {
-        File.writeTextFile(batchFilePath, batchContent);
-        console.writeln((CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS") ?
-                        "Shell script created: " + batchFilePath :
-                        "Batch file created: " + batchFilePath);
-    } catch (error) {
-        console.criticalln("Failed to create batch/shell file: " + error.message);
-        return false;
-    }
+        # Show progress update
+        show_progress(idx + 1, len(chunks))
 
-    return true;
-}
+    # Stitch the chunks back together
+    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
+    return denoised_channel
+
+# Function to replace the 5-pixel border from the original image into the processed image
+def replace_border(original_image, processed_image, border_size=5):
+    # Ensure the dimensions of both images match
+    if original_image.shape != processed_image.shape:
+        raise ValueError("Original image and processed image must have the same dimensions.")
+    
+    # Replace the top border
+    processed_image[:border_size, :] = original_image[:border_size, :]
+    
+    # Replace the bottom border
+    processed_image[-border_size:, :] = original_image[-border_size:, :]
+    
+    # Replace the left border
+    processed_image[:, :border_size] = original_image[:, :border_size]
+    
+    # Replace the right border
+    processed_image[:, -border_size:] = original_image[:, -border_size:]
+    
+    return processed_image
 
 
-// Function to wait for the output file and handle the image processing
-function waitForFile(outputFilePath, timeoutSeconds = 120) {
-    let elapsedTime = 0;
-    let pollingInterval = 1000;  // Poll every 1 second
-    while (elapsedTime < timeoutSeconds * 1000) {
-        if (File.exists(outputFilePath)) {
-            console.writeln("Output file found: " + outputFilePath);
-            return true;
-        }
-        msleep(pollingInterval);
-        elapsedTime += pollingInterval;
-    }
-    console.criticalln("Timeout waiting for file: " + outputFilePath);
-    return false;
-}
+def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
+    image = None
+    file_extension = image_path.lower().split('.')[-1]
 
-// Function to revert the image to its original linear state after denoising
-function revertToLinearState(view) {
-    if (SetiAstroDenoiseParameters.isLinear) {
-        console.writeln("Reverting to original linear state.");
+    try:
+        if file_extension in ['tif', 'tiff']:
+            # Load the image as 32-bit float directly
+            image = tiff.imread(image_path).astype(np.float32)
 
-        let originalMedian = SetiAstroDenoiseParameters.originalMedian;
-        let originalMin = SetiAstroDenoiseParameters.originalMin;
+            # Check if the image is grayscale (mono) or color
+            if len(image.shape) == 2:  # Grayscale image
+                print("Detected grayscale (mono) image. Denoising single channel directly.")
+                denoised_image = denoise_channel(image, device, model)  # Directly denoise the single channel
+                denoised_image = replace_border(image, denoised_image)  # Replace the border after denoising
+                return denoised_image  # Return the denoised single channel image
+            else:
+                print("Detected color image.")
+        else:
+            # For non-TIFF files, read and convert to 32-bit float for consistency
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32)
+    except Exception as e:
+        print(f"Error reading image {image_path}: {e}")
+        return None
 
-        // First PixelMath operation to undo the unlinked stretch
-        let pixelMath1 = new PixelMath;
-        if (view.mainView.image.numberOfChannels === 1) {
-            pixelMath1.expression = "((Med($T)-1)*" + originalMedian + "*$T)/(Med($T)*(" + originalMedian + "+$T-1)-" + originalMedian + "*$T)";
-        } else {
-            pixelMath1.expression = "MedColor = avg(Med($T[0]), Med($T[1]), Med($T[2]));\n" +
-                                    "((MedColor-1)*" + originalMedian + "*$T)/(MedColor*(" + originalMedian + "+$T-1)-" + originalMedian + "*$T)";
-            pixelMath1.symbols = "MedColor";
-        }
-        pixelMath1.useSingleExpression = true;
-        pixelMath1.executeOn(view.mainView);
+    if denoise_mode == 'luminance':
+        print("Denoising Luminance (Y) channel only...")
+        # Split into YCbCr and denoise the Y channel (luminance)
+        y, cb, cr = extract_ycbcr(image)
+        denoised_y = denoise_channel(y, device, model)
+        denoised_y = replace_border(y, denoised_y)  # Replace the border on the Y channel
+        denoised_image = merge_ycbcr(denoised_y, cb, cr)  # Recombine channels for RGB
+    else:
+        print("Denoising full RGB channels (R, G, B)...")
+        # Split image into R, G, B channels and denoise each separately
+        r, g, b = image[:, :, 0], image[:, :, 1], image[:, :, 2]  # Split into R, G, B
+        denoised_r = denoise_channel(r, device, model)
+        denoised_g = denoise_channel(g, device, model)
+        denoised_b = denoise_channel(b, device, model)
 
-        console.writeln("Image reverted to original linear state.");
-    }
-}
+        # Replace borders for each channel
+        denoised_r = replace_border(r, denoised_r)
+        denoised_g = replace_border(g, denoised_g)
+        denoised_b = replace_border(b, denoised_b)
 
-// Process the denoised image after waiting for it
-function processOutputImage(outputFilePath, targetView) {
-    if (!File.exists(outputFilePath)) {
-        console.criticalln("Denoised file not found: " + outputFilePath);
-        return;
-    }
+        # Merge the denoised R, G, B channels back into an RGB image
+        denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
 
-    let denoisedWindow = ImageWindow.open(outputFilePath)[0];
-    if (denoisedWindow) {
-        denoisedWindow.show();
-
-        let pixelMath = new PixelMath;
-        pixelMath.expression = "iif(" + denoisedWindow.mainView.id + " == 0, $T, " + denoisedWindow.mainView.id + ")";
-        pixelMath.useSingleExpression = true;
-        pixelMath.createNewImage = false;
-        pixelMath.executeOn(targetView.mainView);
-        denoisedWindow.forceClose();
-
-        try {
-            File.remove(outputFilePath);
-            console.writeln("Deleted denoised file: " + outputFilePath);
-        } catch (error) {
-            console.warningln("Failed to delete denoised file: " + outputFilePath);
-        }
-
-        // Revert the image back to its original linear state
-        revertToLinearState(targetView);
-    } else {
-        console.criticalln("Failed to open denoised image: " + outputFilePath);
-    }
-}
+    return denoised_image
 
 
-// Function to delete the input file
-function deleteInputFile(inputFilePath) {
-    try {
-        if (File.exists(inputFilePath)) {
-            File.remove(inputFilePath);
-            console.writeln("Deleted input file: " + inputFilePath);
-        } else {
-            console.warningln("Input file not found: " + inputFilePath);
-        }
-    } catch (error) {
-        console.warningln("Failed to delete input file: " + inputFilePath);
-    }
-}
+
+# Function to denoise a single channel
+def denoise_channel(channel, device, model):
+    # Split channel into chunks
+    chunk_size = 256
+    overlap = 64
+    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
+
+    denoised_chunks = []
+
+    # Apply denoise model to each chunk
+    for idx, (chunk, i, j) in enumerate(chunks):
+        chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+        with torch.no_grad():
+            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+        denoised_chunks.append((denoised_chunk, i, j))
+
+        # Show progress update
+        show_progress(idx + 1, len(chunks))
+
+    # Stitch the chunks back together
+    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
+    return denoised_channel
 
 
-// Main execution block for running the script
-let dialog = new SetiAstroDenoiseDialog();
-console.show();
-console.writeln("SetiAstroCosmicClarityDenoise process started.");
-console.flush();
+# Main process for denoising images
+def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
+    print((r"""
+ *#        ___     __      ___       __                              #
+ *#       / __/___/ /__   / _ | ___ / /________                      #
+ *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
+ *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
+ *#                                                                  #
+ *#              Cosmic Clarity - Denoise V2.1                       # 
+ *#                                                                  #
+ *#                         SetiAstro                                #
+ *#                    Copyright © 2024                              #
+ *#                                                                  #
+        """))
 
-if (dialog.execute()) {
-    let selectedIndex = dialog.imageSelectionDropdown.currentItem;
-    let selectedView = ImageWindow.windows[selectedIndex];
+    if denoise_strength is None:
+        # Prompt for user input
+        use_gpu, denoise_strength, denoise_mode = get_user_input()
 
-    if (!selectedView) {
-        console.criticalln("Please select an image.");
-    } else {
-        let inputFolderPath = SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath + pathSeparator + "input";
-        let outputFolderPath = SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath + pathSeparator + "output";
-        let outputFileName = selectedView.mainView.id + "_denoised.tif";
-        let outputFilePath = outputFolderPath + pathSeparator + outputFileName;
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-        let inputFilePath = saveImageAsTiff(inputFolderPath, selectedView);
-        let batchFilePath = SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath + pathSeparator + "run_setiastrocosmicclaritydenoise" + SCRIPT_EXT;
+    # Load the denoise model
+    models = load_model(exe_dir, use_gpu)
 
-        if (createBatchFile(batchFilePath, SetiAstroDenoiseParameters.setiAstroDenoiseParentFolderPath, SetiAstroDenoiseParameters.denoiseStrength, SetiAstroDenoiseParameters.useGPU, SetiAstroDenoiseParameters.denoiseMode)) {
-            let process = new ExternalProcess;
-            try {
-                if (CoreApplication.platform == "MACOSX" || CoreApplication.platform == "macOS" || CoreApplication.platform == "LINUX") {
-                    if (!process.start(CMD_EXEC, [batchFilePath])) {
-                        console.writeln("SetiAstroCosmicClarityDenoise started.");
-                        console.flush();
-                    }
-                } else if (CoreApplication.platform == "MSWINDOWS" || CoreApplication.platform == "Windows") {
-                    if (!process.start(CMD_EXEC, ["/c", batchFilePath])) {
-                        console.writeln("SetiAstroCosmicClarityDenoise started.");
-                        console.flush();
-                    }
-                }
-            } catch (error) {
-                console.criticalln("Error starting process: " + error.message);
-            }
+    # Process each image in the input directory
+    for image_name in os.listdir(input_dir):
+        image_path = os.path.join(input_dir, image_name)
+        denoised_image = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
 
-            if (waitForFile(outputFilePath, 600)) {
-                processOutputImage(outputFilePath, selectedView);
-                deleteInputFile(inputFilePath);
-            } else {
-                console.criticalln("Output file not found within timeout.");
-            }
-        }
-    }
-}
+        if denoised_image is not None:
+            file_extension = os.path.splitext(image_name)[1].lower()
+            output_image_name = os.path.splitext(image_name)[0] + "_denoised.tif"
+            output_image_path = os.path.join(output_dir, output_image_name)
+
+            if file_extension in ['.tif', '.tiff']:
+                # Directly save as 32-bit TIFF without scaling or conversions
+                tiff.imwrite(output_image_path, denoised_image.astype(np.float32), dtype=np.float32)
+                print(f"Saved 32-bit denoised image to: {output_image_path}")
+            else:
+                # Handle non-TIFF formats, which may require conversion to 8-bit
+                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_denoised.png")
+                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)  # Convert to 8-bit for PNG
+                denoised_image_pil = Image.fromarray(denoised_image_8bit)
+                denoised_image_pil.save(output_image_path)
+                print(f"Saved 8-bit denoised image to: {output_image_path}")
+
+# Define input and output directories
+input_dir = os.path.join(exe_dir, 'input')
+output_dir = os.path.join(exe_dir, 'output')
+
+if not os.path.exists(input_dir):
+    os.makedirs(input_dir)
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+# Add argument parsing for batch/script execution
+parser = argparse.ArgumentParser(description="Cosmic Clarity Denoise Tool")
+parser.add_argument('--denoise_strength', type=float, help="Denoise strength (0-1)")
+parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
+parser.add_argument('--denoise_mode', type=str, choices=['luminance', 'full'], default='luminance', help="Denoise mode: luminance or full YCbCr denoising")
+
+args = parser.parse_args()
+
+# Determine whether to use GPU based on command-line argument
+use_gpu = not args.disable_gpu
+
+# Pass arguments if provided, or fall back to defaults
+process_images(input_dir, output_dir, args.denoise_strength, use_gpu, args.denoise_mode)
