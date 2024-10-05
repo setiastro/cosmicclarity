@@ -195,7 +195,27 @@ def denoise_channel(channel, device, model):
     denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
     return denoised_channel
 
-# Function to denoise an image (luminance or full RGB mode)
+# Function to replace the 5-pixel border from the original image into the processed image
+def replace_border(original_image, processed_image, border_size=5):
+    # Ensure the dimensions of both images match
+    if original_image.shape != processed_image.shape:
+        raise ValueError("Original image and processed image must have the same dimensions.")
+    
+    # Replace the top border
+    processed_image[:border_size, :] = original_image[:border_size, :]
+    
+    # Replace the bottom border
+    processed_image[-border_size:, :] = original_image[-border_size:, :]
+    
+    # Replace the left border
+    processed_image[:, :border_size] = original_image[:, :border_size]
+    
+    # Replace the right border
+    processed_image[:, -border_size:] = original_image[:, -border_size:]
+    
+    return processed_image
+
+
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
     image = None
     file_extension = image_path.lower().split('.')[-1]
@@ -209,6 +229,7 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             if len(image.shape) == 2:  # Grayscale image
                 print("Detected grayscale (mono) image. Denoising single channel directly.")
                 denoised_image = denoise_channel(image, device, model)  # Directly denoise the single channel
+                denoised_image = replace_border(image, denoised_image)  # Replace the border after denoising
                 return denoised_image  # Return the denoised single channel image
             else:
                 print("Detected color image.")
@@ -224,6 +245,7 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         # Split into YCbCr and denoise the Y channel (luminance)
         y, cb, cr = extract_ycbcr(image)
         denoised_y = denoise_channel(y, device, model)
+        denoised_y = replace_border(y, denoised_y)  # Replace the border on the Y channel
         denoised_image = merge_ycbcr(denoised_y, cb, cr)  # Recombine channels for RGB
     else:
         print("Denoising full RGB channels (R, G, B)...")
@@ -233,10 +255,16 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         denoised_g = denoise_channel(g, device, model)
         denoised_b = denoise_channel(b, device, model)
 
+        # Replace borders for each channel
+        denoised_r = replace_border(r, denoised_r)
+        denoised_g = replace_border(g, denoised_g)
+        denoised_b = replace_border(b, denoised_b)
+
         # Merge the denoised R, G, B channels back into an RGB image
         denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
 
     return denoised_image
+
 
 
 # Function to denoise a single channel
@@ -271,7 +299,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V2.0                       # 
+ *#              Cosmic Clarity - Denoise V2.1                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
