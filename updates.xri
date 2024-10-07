@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.04.2024.zip" sha1="775de0bbed63851bf6d6a53fb097523748d29d8a" type="script" releaseDate="20241004">
+      <package fileName="SetiAstroCosmicClarity10.07.2024.zip" sha1="9a5a82521bceb8e9aa715d7e83abdfd35324f6d2" type="script" releaseDate="20241007">
          <title>
-        Cosmic Clarity - Denoise and Sharpen
+        Cosmic Clarity Denoise and Sharpen
       </title>
          <description>
             <p>
-Updated to correctly revert back to the original linear state with no offsets.  Please visit my website to get the latest Cosmic Clarity program for Windows, MacOS, or Linux.  www.setiastro.com
+Updated to handle linear states fully in the background so that the user will have a single undo action to see the before and after sharpening/denoising states.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-04T23:17:41.031Z" encoding="Base64">wMyF5mrLiUNdQPop1fAZxNcks5feX3Vn7iksdSVUza+kWKCmN6DuHoGzxlnxB+1sgx1JlteZovE8W3YOJMckAg==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-07T21:59:30.914Z" encoding="Base64">GafwDOcDcKPq+SaoOZAaoDGotiMtX/7qY2JcLxKGZNeQiLamMr0TLGc+NIRQicwpsroF1qiMlJRm4xYMR3E2CQ==</Signature>
