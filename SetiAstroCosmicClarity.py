@@ -10,6 +10,8 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox
 import argparse  # For command-line argument parsing
 import time  # For simulating progress updates
+from tkinter import ttk
+from tkinter import filedialog
 
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
@@ -209,42 +211,86 @@ def interpolate_nonstellar_sharpening(sharpened_1, sharpened_2, sharpened_4, sha
     else:
         return blend_images(sharpened_4, sharpened_8, (strength - 4) / 4)
 
-# Function to get user input for sharpening mode, non-stellar strength, and stellar amount (Interactive)
 def get_user_input():
+    # Define global variables to store the user input
+    global use_gpu, sharpening_mode, nonstellar_strength, stellar_amount
+
+    def on_submit():
+        # Update the global variables with the user's selections
+        global use_gpu, sharpening_mode, nonstellar_strength, stellar_amount
+        use_gpu = gpu_var.get() == "Yes"
+        sharpening_mode = mode_var.get()
+        nonstellar_strength = nonstellar_strength_slider.get()
+        stellar_amount = stellar_amount_slider.get() if sharpening_mode != "Non-Stellar Only" else None
+        root.destroy()
+
+    def update_sliders(*args):
+        # Show or hide sliders based on the selected sharpening mode
+        mode = mode_var.get()
+        if mode == "Both":
+            nonstellar_strength_label.pack()
+            nonstellar_strength_slider.pack()
+            stellar_amount_label.pack()
+            stellar_amount_slider.pack()
+        elif mode == "Stellar Only":
+            nonstellar_strength_label.pack_forget()
+            nonstellar_strength_slider.pack_forget()
+            stellar_amount_label.pack()
+            stellar_amount_slider.pack()
+        elif mode == "Non-Stellar Only":
+            nonstellar_strength_label.pack()
+            nonstellar_strength_slider.pack()
+            stellar_amount_label.pack_forget()
+            stellar_amount_slider.pack_forget()
+
+        # Ensure the submit button is always the last widget to be packed
+        submit_button.pack_forget()
+        submit_button.pack(pady=20)
+
+    # Create the main Tkinter window
     root = tk.Tk()
-    root.withdraw()
+    root.title("Cosmic Clarity Sharpening Tool")
+    root.geometry("400x400")  # Set window size
 
-    # Ask user if they want to disable GPU acceleration
-    use_gpu = messagebox.askyesno("GPU Acceleration", "Do you want to use GPU acceleration? (Yes: Enable GPU, No: Use CPU)")
+    # GPU selection
+    gpu_label = ttk.Label(root, text="Use GPU Acceleration:")
+    gpu_label.pack(pady=5)
+    gpu_var = tk.StringVar(value="Yes")
+    gpu_dropdown = ttk.OptionMenu(root, gpu_var, "Yes", "Yes", "No")
+    gpu_dropdown.pack()
 
-    valid_stellar_inputs = ["Stellar", "Stellar Only", "stellar"]
-    valid_nonstellar_inputs = ["Non-Stellar", "Non-Stellar Only", "non-stellar"]
-    sharpening_options = valid_stellar_inputs + valid_nonstellar_inputs + ["Both"]
+    # Sharpening mode selection
+    mode_label = ttk.Label(root, text="Sharpening Mode:")
+    mode_label.pack(pady=5)
+    mode_var = tk.StringVar(value="Both")
+    mode_dropdown = ttk.OptionMenu(root, mode_var, "Both", "Both", "Stellar Only", "Non-Stellar Only")
+    mode_dropdown.pack()
 
-    sharpening_mode = simpledialog.askstring("Sharpening Mode", "Choose sharpening mode (Stellar, Non-Stellar, Both):")
+    # Bind the update function to the mode selection
+    mode_var.trace('w', update_sliders)
 
-    # Normalize the input for "Stellar" and "Non-Stellar"
-    if sharpening_mode in valid_stellar_inputs:
-        sharpening_mode = "Stellar Only"
-    elif sharpening_mode in valid_nonstellar_inputs:
-        sharpening_mode = "Non-Stellar Only"
+    # Non-Stellar strength slider
+    nonstellar_strength_label = ttk.Label(root, text="Non-Stellar Sharpening Strength (1-8):")
+    nonstellar_strength_slider = tk.Scale(root, from_=1, to=8, orient="horizontal", resolution=.1)
+    nonstellar_strength_slider.set(3)
 
-    if sharpening_mode not in sharpening_options:
-        messagebox.showerror("Error", "Invalid choice. Defaulting to 'Both'.")
-        sharpening_mode = "Both"
+    # Stellar amount slider (only if Stellar or Both are selected)
+    stellar_amount_label = ttk.Label(root, text="Stellar Sharpening Amount (0-1):")
+    stellar_amount_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
+    stellar_amount_slider.set(0.9)  # Set default value to 0.9
 
-    # Ask for Stellar Amount only if mode is "Stellar Only" or "Both"
-    stellar_amount = None
-    if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
-        stellar_amount = simpledialog.askfloat("Stellar Amount", "Enter stellar sharpening amount (0-1):", initialvalue=0.9, minvalue=0, maxvalue=1)
+    # Submit button
+    submit_button = ttk.Button(root, text="Submit", command=on_submit)
 
-    nonstellar_strength = None
-    if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
-        nonstellar_strength = simpledialog.askfloat("Non-Stellar Strength", "Enter non-stellar sharpening strength (1-8):", minvalue=1, maxvalue=8)
+    # Call update_sliders initially to set the correct visibility
+    update_sliders()
 
-    root.destroy()
+    root.mainloop()
 
     return use_gpu, sharpening_mode, nonstellar_strength, stellar_amount
+
+
+
 
 # Function to show progress during chunk processing
 def show_progress(current, total):
@@ -391,7 +437,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V3.1                       # 
+ *#              Cosmic Clarity - Sharpen V3.2                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
