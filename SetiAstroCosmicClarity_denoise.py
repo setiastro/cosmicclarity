@@ -8,6 +8,7 @@ import tifffile as tiff
 from PIL import Image
 import tkinter as tk
 from tkinter import simpledialog, messagebox
+from tkinter import ttk
 import argparse  # For command-line argument parsing
 
 # Suppress model loading warnings
@@ -70,41 +71,57 @@ def load_model(exe_dir, use_gpu=True):
         "device": device
     }
 
-# Function to extract Y, Cb, Cr channels from an RGB image
-def extract_ycbcr(image):
-    # Convert numpy array to Pillow Image object if necessary
-    if isinstance(image, np.ndarray):
-        image = Image.fromarray(image.astype(np.uint8))  # No need to multiply by 255 again
+# Function to extract luminance (Y channel) from an RGB image in 32-bit float precision
+def extract_luminance(image):
+    # Ensure the image is a NumPy array before processing
+    if isinstance(image, Image.Image):
+        image = np.array(image).astype(np.float32) / 255.0  # Convert to 32-bit float
 
-    # Convert to YCbCr color space
-    ycbcr_image = image.convert('YCbCr')
+    # Convert RGB image to YCbCr and extract the Y channel (luminance)
+    ycbcr_image = Image.fromarray(np.clip(image * 255, 0, 255).astype(np.uint8)).convert('YCbCr')
     y, cb, cr = ycbcr_image.split()
 
-    # Return Y, Cb, Cr channels as numpy arrays, scaled to [0, 1]
-    return np.array(y).astype(np.float32), np.array(cb).astype(np.float32), np.array(cr).astype(np.float32)
+    # Convert Y back to 32-bit float
+    return np.array(y).astype(np.float32) / 255.0, cb, cr
 
+# Function to merge the denoised luminance (Y) with original chrominance (Cb and Cr) to reconstruct RGB image
+def merge_luminance(y_denoised, cb, cr):
+    # Ensure Y is clipped between 0 and 1, as we're working in 32-bit float precision
+    y_denoised = np.clip(y_denoised, 0.0, 1.0)
 
-# Function to merge the denoised Y, Cb, Cr channels back to an RGB image, maintaining precision
-def merge_ycbcr(y_denoised, cb, cr):
-    # Ensure Y, Cb, and Cr channels are clipped between 0 and 255
-    y_denoised = np.clip(y_denoised, 0, 255)
-    cb = np.clip(cb, 0, 255)
-    cr = np.clip(cr, 0, 255)
+    # Convert Cb and Cr from Pillow image objects to numpy arrays (if needed)
+    cb = np.array(cb).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
+    cr = np.array(cr).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
 
-    # Convert back to uint8 for Pillow processing, but this should happen only at the final step
-    y_denoised_img = Image.fromarray(y_denoised.astype(np.uint8))
-    cb_img = Image.fromarray(cb.astype(np.uint8))
-    cr_img = Image.fromarray(cr.astype(np.uint8))
+    # Recreate the YCbCr image as a stack of 32-bit float arrays (Y, Cb, Cr)
+    ycbcr_image = np.stack([y_denoised, cb, cr], axis=-1)
 
-    # Merge and convert back to RGB
-    ycbcr_image = Image.merge('YCbCr', (y_denoised_img, cb_img, cr_img))
-    return ycbcr_image.convert('RGB')
+    # Convert YCbCr to RGB while keeping everything in 32-bit float space
+    rgb_image = ycbcr_to_rgb(ycbcr_image)
 
+    return rgb_image
 
+# Helper function to convert YCbCr (32-bit float) to RGB
+def ycbcr_to_rgb(ycbcr_image):
+    # Conversion matrix for YCbCr to RGB (ITU-R BT.601 standard)
+    conversion_matrix = np.array([[1.0,  0.0, 1.402],
+                                  [1.0, -0.344136, -0.714136],
+                                  [1.0,  1.772, 0.0]])
+
+    # Normalize Cb and Cr from [0, 1] to [-0.5, 0.5] as required by YCbCr specification
+    ycbcr_image[:, :, 1:] -= 0.5
+
+    # Apply the YCbCr to RGB conversion matrix in 32-bit float
+    rgb_image = np.dot(ycbcr_image, conversion_matrix.T)
+
+    # Clip to ensure the RGB values stay within [0, 1] range
+    rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+    return rgb_image
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
-    height, width = image.shape
+    height, width = image.shape[:2]
     chunks = []
     step_size = chunk_size - overlap  # Define how much to step over (overlapping area)
 
@@ -130,13 +147,13 @@ def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border
     weight_map = np.zeros(image_shape, dtype=np.float32)  # Track blending weights
     
     for chunk, i, j in chunks:
-        actual_chunk_h, actual_chunk_w = chunk.shape
-        
+        actual_chunk_h, actual_chunk_w = chunk.shape[:2]
+
         # Calculate the boundaries for the current chunk, ignoring the border
         border_h = min(border_size, actual_chunk_h // 2)
         border_w = min(border_size, actual_chunk_w // 2)
 
-        # Always ignore the 5-pixel border for all chunks, including edges
+        # Always ignore the border for all chunks, including edges
         inner_chunk = chunk[border_h:actual_chunk_h-border_h, border_w:actual_chunk_w-border_w]
         stitched_image[i+border_h:i+actual_chunk_h-border_h, j+border_w:j+actual_chunk_w-border_w] += inner_chunk
         weight_map[i+border_h:i+actual_chunk_h-border_h, j+border_w:j+actual_chunk_w-border_w] += 1
@@ -145,55 +162,66 @@ def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border
     stitched_image /= np.maximum(weight_map, 1)  # Avoid division by zero
     return stitched_image
 
+
+
 # Function to blend two images (before and after)
 def blend_images(before, after, amount):
     return (1 - amount) * before + amount * after
 
+
 # Function to get user input for denoise strength (Interactive)
 def get_user_input():
+    # Define global variables to store the user input
+    global use_gpu, denoise_strength, denoise_mode
+
+    def on_submit():
+        # Update the global variables with the user's selections
+        global use_gpu, denoise_strength, denoise_mode
+        use_gpu = gpu_var.get() == "Yes"
+        denoise_strength = denoise_strength_slider.get()
+        denoise_mode = denoise_mode_var.get().lower()  # Convert to lowercase for consistency
+        root.quit()  # Quit the main loop to continue
+
     root = tk.Tk()
-    root.withdraw()
+    root.title("Cosmic Clarity Denoise Tool")
 
-    # Ask user if they want to disable GPU acceleration
-    use_gpu = messagebox.askyesno("GPU Acceleration", "Do you want to use GPU acceleration? (Yes: Enable GPU, No: Use CPU)")
+    # GPU selection
+    gpu_label = ttk.Label(root, text="Use GPU Acceleration:")
+    gpu_label.pack(pady=5)
+    gpu_var = tk.StringVar(value="Yes")
+    gpu_dropdown = ttk.OptionMenu(root, gpu_var, "Yes", "Yes", "No")
+    gpu_dropdown.pack()
 
-    denoise_strength = simpledialog.askfloat("Denoise Strength", "Enter denoise strength (0-1):", initialvalue=0.9, minvalue=0, maxvalue=1)
+    # Denoise strength slider
+    denoise_strength_label = ttk.Label(root, text="Denoise Strength (0-1):")
+    denoise_strength_label.pack(pady=5)
+    denoise_strength_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
+    denoise_strength_slider.set(0.9)  # Set the default value to 0.9
+    denoise_strength_slider.pack()
 
-    # Ask user for denoise mode (luminance or full)
-    denoise_mode = messagebox.askquestion("Denoise Mode", "Do you want full YCbCr denoise? (Yes: Full denoise, No: Luminance only)") 
-    denoise_mode = "full" if denoise_mode == "yes" else "luminance"
+    # Denoise mode selection
+    denoise_mode_label = ttk.Label(root, text="Denoise Mode:")
+    denoise_mode_label.pack(pady=5)
+    denoise_mode_var = tk.StringVar(value="full")  # Set default value to "full"
+    denoise_mode_dropdown = ttk.OptionMenu(root, denoise_mode_var, "full", "luminance", "full")
+    denoise_mode_dropdown.pack()
 
-    root.destroy()
+    # Submit button
+    submit_button = ttk.Button(root, text="Submit", command=on_submit)
+    submit_button.pack(pady=20)
+
+    root.mainloop()  # Run the main event loop
+    root.destroy()  # Destroy the window after quitting the loop
 
     return use_gpu, denoise_strength, denoise_mode
+
+
 
 # Function to show progress during chunk processing
 def show_progress(current, total):
     progress_percentage = (current / total) * 100
     print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r', flush=True)
 
-# Function to denoise a channel (Y, Cb, Cr)
-def denoise_channel(channel, device, model):
-    # Split channel into chunks
-    chunk_size = 256
-    overlap = 64
-    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
-
-    denoised_chunks = []
-
-    # Apply denoise model to each chunk
-    for idx, (chunk, i, j) in enumerate(chunks):
-        chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
-        with torch.no_grad():
-            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-        denoised_chunks.append((denoised_chunk, i, j))
-
-        # Show progress update
-        show_progress(idx + 1, len(chunks))
-
-    # Stitch the chunks back together
-    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
-    return denoised_channel
 
 # Function to replace the 5-pixel border from the original image into the processed image
 def replace_border(original_image, processed_image, border_size=5):
@@ -215,59 +243,44 @@ def replace_border(original_image, processed_image, border_size=5):
     
     return processed_image
 
-
+# Main denoise function for an image
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
-    image = None
-    file_extension = image_path.lower().split('.')[-1]
-
     try:
-        if file_extension in ['tif', 'tiff']:
-            # Load the image as 32-bit float directly
-            image = tiff.imread(image_path).astype(np.float32)
-
-            # Check if the image is grayscale (mono) or color
-            if len(image.shape) == 2:  # Grayscale image
-                print("Detected grayscale (mono) image. Denoising single channel directly.")
-                denoised_image = denoise_channel(image, device, model)  # Directly denoise the single channel
-                denoised_image = replace_border(image, denoised_image)  # Replace the border after denoising
-                return denoised_image  # Return the denoised single channel image
-            else:
-                print("Detected color image.")
+        # Load the image based on its extension
+        file_extension = os.path.splitext(image_path)[1].lower()
+        if file_extension in ['.tif', '.tiff']:
+            image = tiff.imread(image_path).astype(np.float32)  # Load as 32-bit float for TIFF
         else:
-            # For non-TIFF files, read and convert to 32-bit float for consistency
-            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32)
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load as 32-bit float for PNG
+
+        # Check if the image is grayscale (mono) or color
+        if len(image.shape) == 2:  # Grayscale image
+            print("Detected grayscale (mono) image. Denoising single channel directly.")
+            denoised_image = denoise_channel(image, device, model)
+            denoised_image = blend_images(image, denoised_image, denoise_strength)
+            return replace_border(image, denoised_image)
+
+        print("Detected color image.")
+        if denoise_mode == 'luminance':
+            print("Denoising Luminance (Y) channel only...")
+            y, cb, cr = extract_luminance(image)
+            denoised_y = denoise_channel(y, device, model)
+            denoised_y = blend_images(y, denoised_y, denoise_strength)
+            denoised_image = merge_luminance(replace_border(y, denoised_y), cb, cr)
+            return denoised_image
+
+        print("Denoising full RGB channels...")
+        denoised_channels = [blend_images(image[:, :, c], denoise_channel(image[:, :, c], device, model), denoise_strength)
+                             for c in range(3)]
+        denoised_image = np.stack([replace_border(image[:, :, c], denoised_channels[c]) for c in range(3)], axis=-1)
+        return denoised_image
+
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
         return None
 
-    if denoise_mode == 'luminance':
-        print("Denoising Luminance (Y) channel only...")
-        # Split into YCbCr and denoise the Y channel (luminance)
-        y, cb, cr = extract_ycbcr(image)
-        denoised_y = denoise_channel(y, device, model)
-        denoised_y = replace_border(y, denoised_y)  # Replace the border on the Y channel
-        denoised_image = merge_ycbcr(denoised_y, cb, cr)  # Recombine channels for RGB
-    else:
-        print("Denoising full RGB channels (R, G, B)...")
-        # Split image into R, G, B channels and denoise each separately
-        r, g, b = image[:, :, 0], image[:, :, 1], image[:, :, 2]  # Split into R, G, B
-        denoised_r = denoise_channel(r, device, model)
-        denoised_g = denoise_channel(g, device, model)
-        denoised_b = denoise_channel(b, device, model)
 
-        # Replace borders for each channel
-        denoised_r = replace_border(r, denoised_r)
-        denoised_g = replace_border(g, denoised_g)
-        denoised_b = replace_border(b, denoised_b)
-
-        # Merge the denoised R, G, B channels back into an RGB image
-        denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
-
-    return denoised_image
-
-
-
-# Function to denoise a single channel
+# Function to denoise a channel (Y, Cb, Cr)
 def denoise_channel(channel, device, model):
     # Split channel into chunks
     chunk_size = 256
@@ -278,9 +291,11 @@ def denoise_channel(channel, device, model):
 
     # Apply denoise model to each chunk
     for idx, (chunk, i, j) in enumerate(chunks):
-        chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+        chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+
         with torch.no_grad():
-            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().numpy()[0]
+
         denoised_chunks.append((denoised_chunk, i, j))
 
         # Show progress update
@@ -291,6 +306,7 @@ def denoise_channel(channel, device, model):
     return denoised_channel
 
 
+
 # Main process for denoising images
 def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
     print((r"""
@@ -299,7 +315,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V2.1                       # 
+ *#              Cosmic Clarity - Denoise V2.2                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -320,21 +336,20 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
+        file_extension = os.path.splitext(image_name)[1].lower()
         denoised_image = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
 
         if denoised_image is not None:
-            file_extension = os.path.splitext(image_name)[1].lower()
-            output_image_name = os.path.splitext(image_name)[0] + "_denoised.tif"
-            output_image_path = os.path.join(output_dir, output_image_name)
+            output_image_name = os.path.splitext(image_name)[0] + "_denoised"
 
+            # Save the image based on its extension
             if file_extension in ['.tif', '.tiff']:
-                # Directly save as 32-bit TIFF without scaling or conversions
-                tiff.imwrite(output_image_path, denoised_image.astype(np.float32), dtype=np.float32)
+                output_image_path = os.path.join(output_dir, output_image_name + ".tif")
+                tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
                 print(f"Saved 32-bit denoised image to: {output_image_path}")
             else:
-                # Handle non-TIFF formats, which may require conversion to 8-bit
-                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_denoised.png")
-                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)  # Convert to 8-bit for PNG
+                output_image_path = os.path.join(output_dir, output_image_name + ".png")
+                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)
                 denoised_image_pil = Image.fromarray(denoised_image_8bit)
                 denoised_image_pil.save(output_image_path)
                 print(f"Saved 8-bit denoised image to: {output_image_path}")
