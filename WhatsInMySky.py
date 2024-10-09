@@ -15,14 +15,31 @@ import pytz
 from PIL import Image, ImageTk
 from astropy.coordinates import get_sun
 import warnings
+import astropy.utils.iers as iers
+from astropy.utils.data import download_file
+from astropy.utils.exceptions import AstropyWarning
 
 # Suppress warnings
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=AstropyWarning)
+
+# Specify fallback options for IERS data
+iers.conf.iers_degraded_accuracy = "warn"
+iers.conf.auto_download = False
+
+try:
+    # Attempt to download the latest IERS data for more accurate timing calculations
+    iers_file = download_file(iers.IERS_A_URL, cache=True)
+    iers_table = iers.IERS_A.open(iers_file)
+    iers.conf.iers_table = iers_table
+except Exception as e:
+    print(f"Unable to download IERS A file, using IERS B: {e}")
+    iers.conf.iers_auto_url = None
+    iers.conf.iers_table = iers.IERS_B.open()
 
 class WhatsInMySky:
     def __init__(self, root):
         self.root = root
-        self.root.title("What's In My Sky v1.1 - Seti Astro")
+        self.root.title("What's In My Sky v1.0 - Seti Astro")
 
         # Load previous settings
         self.settings_file = os.path.join(os.path.expanduser("~"), "sky_settings.json")
@@ -91,7 +108,7 @@ class WhatsInMySky:
         self.lunar_phase_image_label = tk.Label(root)
         self.lunar_phase_image_label.grid(row=0, column=3, rowspan=4, padx=5, pady=5, sticky='ne')
         self.lunar_phase_label = tk.Label(root, text="Lunar Phase: N/A")
-        self.lunar_phase_label.grid(row=4, column=3, padx=5, pady=5)
+        self.lunar_phase_label.grid(row=4, column=3, padx=5, pady=5, sticky='n')
 
         # Treeview to display results
         self.tree = ttk.Treeview(root, columns=("Name", "RA", "Dec", "Altitude", "Azimuth", "Minutes to Transit", "Before/After Transit", "Degrees from Moon", "Alt Name", "Type", "Magnitude", "Info"), show="headings")
@@ -280,7 +297,7 @@ class WhatsInMySky:
 
         # Determine lunar phase percentage
         phase_percentage = (1 - np.cos(np.radians(elongation))) / 2 * 100
-        phase_percentage = round(phase_percentage)
+        phase_percentage = round(100 - phase_percentage)
 
         # Select appropriate lunar phase image based on phase angle
         phase_folder = os.path.join(sys._MEIPASS, "imgs") if getattr(sys, 'frozen', False) else os.path.join(os.path.dirname(__file__), "imgs")
@@ -415,4 +432,4 @@ if __name__ == "__main__":
 
 # Franklin Marek
 # www.setiastro.com
-# Copyright 2024poyth
+# Copyright 2024
