@@ -3,7 +3,7 @@ from tkinter import ttk, simpledialog
 from datetime import datetime
 import astropy.units as u
 from astropy.time import Time
-from astropy.coordinates import EarthLocation, AltAz, SkyCoord
+from astropy.coordinates import EarthLocation, AltAz, SkyCoord, get_body
 import pandas as pd
 import numpy as np
 import os
@@ -12,11 +12,17 @@ import threading
 import webbrowser
 import sys
 import pytz
+from PIL import Image, ImageTk
+from astropy.coordinates import get_sun
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
 
 class WhatsInMySky:
     def __init__(self, root):
         self.root = root
-        self.root.title("What's In My Sky v1.0 - Seti Astro")
+        self.root.title("What's In My Sky v1.1 - Seti Astro")
 
         # Load previous settings
         self.settings_file = os.path.join(os.path.expanduser("~"), "sky_settings.json")
@@ -62,7 +68,7 @@ class WhatsInMySky:
         for i, catalog in enumerate(catalogs):
             var = tk.BooleanVar(value=True)
             chk = tk.Checkbutton(root, text=catalog, variable=var)
-            chk.grid(row=6 + (i // 2), column=i % 2, padx=5, pady=5, sticky='w')
+            chk.grid(row=6 + (i % 3), column=(i // 3), padx=5, pady=5, sticky='w')
             self.catalog_vars[catalog] = var
 
         # Button to calculate
@@ -81,23 +87,29 @@ class WhatsInMySky:
         self.lst_label = tk.Label(root, text="Local Sidereal Time: N/A")
         self.lst_label.grid(row=11, column=0, columnspan=3, pady=5)
 
+        # Lunar Phase Image and Label
+        self.lunar_phase_image_label = tk.Label(root)
+        self.lunar_phase_image_label.grid(row=0, column=3, rowspan=4, padx=5, pady=5, sticky='ne')
+        self.lunar_phase_label = tk.Label(root, text="Lunar Phase: N/A")
+        self.lunar_phase_label.grid(row=4, column=3, padx=5, pady=5)
+
         # Treeview to display results
-        self.tree = ttk.Treeview(root, columns=("Name", "RA", "Dec", "Altitude", "Azimuth", "Minutes to Transit", "Before/After Transit", "Alt Name", "Type", "Magnitude", "Info"), show="headings")
+        self.tree = ttk.Treeview(root, columns=("Name", "RA", "Dec", "Altitude", "Azimuth", "Minutes to Transit", "Before/After Transit", "Degrees from Moon", "Alt Name", "Type", "Magnitude", "Info"), show="headings")
         for col in self.tree['columns']:
             self.tree.heading(col, text=col, command=lambda _col=col: self.treeview_sort_column(self.tree, _col, False))
-        self.tree.grid(row=12, column=0, columnspan=3, pady=10, sticky='nsew')
+        self.tree.grid(row=14, column=0, columnspan=3, pady=10, sticky='nsew')
 
         # Add scrollbar to Treeview
         self.tree_scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=self.tree_scrollbar.set)
-        self.tree_scrollbar.grid(row=12, column=3, sticky='ns', pady=10)
+        self.tree_scrollbar.grid(row=14, column=3, sticky='ns', pady=10)
 
         # Configure column width
         for col in self.tree['columns']:
             self.tree.column(col, anchor='center', width=100)
 
         # Configure resizing
-        root.grid_rowconfigure(12, weight=1)
+        root.grid_rowconfigure(14, weight=1)
         root.grid_columnconfigure(1, weight=1)
 
         # Object limit setting
@@ -147,6 +159,9 @@ class WhatsInMySky:
             # Update LST label
             self.update_lst(f"Local Sidereal Time: {lst}")
 
+            # Calculate lunar phase
+            self.calculate_lunar_phase(astropy_time, location)
+
             # Update status label
             self.update_status("Loading celestial catalog...")
 
@@ -174,9 +189,11 @@ class WhatsInMySky:
             selected_catalogs = [catalog for catalog, var in self.catalog_vars.items() if var.get()]
             df = df[df['Catalog'].isin(selected_catalogs)]
 
-            # Calculate Altitude and Azimuth for each object
+            # Calculate Altitude, Azimuth, and Degrees from Moon for each object
             altaz_frame = AltAz(obstime=astropy_time, location=location)
-            altitudes, azimuths, minutes_to_transit, before_after_transit = [], [], [], []
+            altitudes, azimuths, minutes_to_transit, before_after_transit, degrees_from_moon = [], [], [], [], []
+
+            moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
 
             for _, row in df.iterrows():
                 sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
@@ -195,10 +212,15 @@ class WhatsInMySky:
                     before_after_transit.append("Before")
                 minutes_to_transit.append(minutes)
 
+                # Calculate angular distance from the moon
+                moon_sep = sky_coord.separation(moon).deg
+                degrees_from_moon.append(round(moon_sep, 2))
+
             df['Altitude'] = altitudes
             df['Azimuth'] = azimuths
             df['Minutes to Transit'] = minutes_to_transit
             df['Before/After Transit'] = before_after_transit
+            df['Degrees from Moon'] = degrees_from_moon
 
             # Filter out objects below the horizon
             df = df[df['Altitude'] > 0]
@@ -228,6 +250,7 @@ class WhatsInMySky:
                     row['Azimuth'],
                     row['Minutes to Transit'],
                     row['Before/After Transit'],
+                    row['Degrees from Moon'],
                     row.get('Alt Name', '') if pd.notna(row.get('Alt Name', '')) else '',
                     row.get('Type', '') if pd.notna(row.get('Type', '')) else '',
                     row.get('Magnitude', '') if pd.notna(row.get('Magnitude', '')) else '',
@@ -249,6 +272,76 @@ class WhatsInMySky:
 
     def update_lst(self, message):
         self.lst_label.config(text=message)
+
+    def calculate_lunar_phase(self, astropy_time, location):
+        moon = get_body("moon", astropy_time, location)
+        sun = get_sun(astropy_time)
+        elongation = moon.separation(sun).deg
+
+        # Determine lunar phase percentage
+        phase_percentage = (1 - np.cos(np.radians(elongation))) / 2 * 100
+        phase_percentage = round(phase_percentage)
+
+        # Select appropriate lunar phase image based on phase angle
+        phase_folder = os.path.join(sys._MEIPASS, "imgs") if getattr(sys, 'frozen', False) else os.path.join(os.path.dirname(__file__), "imgs")
+        phase_image_name = "new_moon.png"  # Default
+
+        if 0 <= elongation < 9:
+            phase_image_name = "new_moon.png"
+        elif 9 <= elongation < 18:
+            phase_image_name = "waxing_crescent_1.png"
+        elif 18 <= elongation < 27:
+            phase_image_name = "waxing_crescent_2.png"
+        elif 27 <= elongation < 36:
+            phase_image_name = "waxing_crescent_3.png"
+        elif 36 <= elongation < 45:
+            phase_image_name = "waxing_crescent_4.png"
+        elif 45 <= elongation < 54:
+            phase_image_name = "waxing_crescent_5.png"
+        elif 54 <= elongation < 90:
+            phase_image_name = "first_quarter.png"
+        elif 90 <= elongation < 108:
+            phase_image_name = "waxing_gibbous_1.png"
+        elif 108 <= elongation < 126:
+            phase_image_name = "waxing_gibbous_2.png"
+        elif 126 <= elongation < 144:
+            phase_image_name = "waxing_gibbous_3.png"
+        elif 144 <= elongation < 162:
+            phase_image_name = "waxing_gibbous_4.png"
+        elif 162 <= elongation < 180:
+            phase_image_name = "full_moon.png"
+        elif 180 <= elongation < 198:
+            phase_image_name = "waning_gibbous_1.png"
+        elif 198 <= elongation < 216:
+            phase_image_name = "waning_gibbous_2.png"
+        elif 216 <= elongation < 234:
+            phase_image_name = "waning_gibbous_3.png"
+        elif 234 <= elongation < 252:
+            phase_image_name = "waning_gibbous_4.png"
+        elif 252 <= elongation < 270:
+            phase_image_name = "last_quarter.png"
+        elif 270 <= elongation < 279:
+            phase_image_name = "waning_crescent_1.png"
+        elif 279 <= elongation < 288:
+            phase_image_name = "waning_crescent_2.png"
+        elif 288 <= elongation < 297:
+            phase_image_name = "waning_crescent_3.png"
+        elif 297 <= elongation < 306:
+            phase_image_name = "waning_crescent_4.png"
+        elif 306 <= elongation < 315:
+            phase_image_name = "waning_crescent_5.png"
+
+        # Load and display the lunar phase image
+        phase_image_path = os.path.join(phase_folder, phase_image_name)
+        if os.path.exists(phase_image_path):
+            image = Image.open(phase_image_path)
+            image = image.resize((100, 100), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            self.lunar_phase_image_label.config(image=photo)
+            self.lunar_phase_image_label.image = photo
+
+        # Update lunar phase label
+        self.lunar_phase_label.config(text=f"Lunar Phase: {phase_percentage}% illuminated")
 
     def load_settings(self):
         if os.path.exists(self.settings_file):
@@ -322,4 +415,4 @@ if __name__ == "__main__":
 
 # Franklin Marek
 # www.setiastro.com
-# Copyright 2024
+# Copyright 2024poyth
