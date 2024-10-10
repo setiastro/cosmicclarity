@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, simpledialog
+from tkinter import ttk, simpledialog, filedialog
 from datetime import datetime
 import astropy.units as u
 from astropy.time import Time
@@ -15,31 +15,18 @@ import pytz
 from PIL import Image, ImageTk
 from astropy.coordinates import get_sun
 import warnings
-import astropy.utils.iers as iers
-from astropy.utils.data import download_file
-from astropy.utils.exceptions import AstropyWarning
+from decimal import Decimal, getcontext
+
+# Set precision for Decimal operations
+getcontext().prec = 24
 
 # Suppress warnings
-warnings.filterwarnings("ignore", category=AstropyWarning)
-
-# Specify fallback options for IERS data
-iers.conf.iers_degraded_accuracy = "warn"
-iers.conf.auto_download = False
-
-try:
-    # Attempt to download the latest IERS data for more accurate timing calculations
-    iers_file = download_file(iers.IERS_A_URL, cache=True)
-    iers_table = iers.IERS_A.open(iers_file)
-    iers.conf.iers_table = iers_table
-except Exception as e:
-    print(f"Unable to download IERS A file, using IERS B: {e}")
-    iers.conf.iers_auto_url = None
-    iers.conf.iers_table = iers.IERS_B.open()
+warnings.filterwarnings("ignore")
 
 class WhatsInMySky:
     def __init__(self, root):
         self.root = root
-        self.root.title("What's In My Sky v1.0 - Seti Astro")
+        self.root.title("What's In My Sky v1.2 - Seti Astro")
 
         # Load previous settings
         self.settings_file = os.path.join(os.path.expanduser("~"), "sky_settings.json")
@@ -47,71 +34,90 @@ class WhatsInMySky:
 
         # Input Fields
         self.latitude_label = tk.Label(root, text="Latitude:")
-        self.latitude_label.grid(row=0, column=0, padx=5, pady=5)
+        self.latitude_label.grid(row=0, column=0, padx=5, pady=5, sticky='e')
         self.latitude_entry = tk.Entry(root)
         self.latitude_entry.grid(row=0, column=1, padx=5, pady=5)
         self.latitude_entry.insert(0, self.settings.get("latitude", ""))
 
         self.longitude_label = tk.Label(root, text="Longitude:")
-        self.longitude_label.grid(row=1, column=0, padx=5, pady=5)
+        self.longitude_label.grid(row=1, column=0, padx=5, pady=5, sticky='e')
         self.longitude_entry = tk.Entry(root)
         self.longitude_entry.grid(row=1, column=1, padx=5, pady=5)
         self.longitude_entry.insert(0, self.settings.get("longitude", ""))
 
         self.date_label = tk.Label(root, text="Date (YYYY-MM-DD):")
-        self.date_label.grid(row=2, column=0, padx=5, pady=5)
+        self.date_label.grid(row=2, column=0, padx=5, pady=5, sticky='e')
         self.date_entry = tk.Entry(root)
         self.date_entry.grid(row=2, column=1, padx=5, pady=5)
         self.date_entry.insert(0, self.settings.get("date", ""))
 
         self.time_label = tk.Label(root, text="Time (HH:MM):")
-        self.time_label.grid(row=3, column=0, padx=5, pady=5)
+        self.time_label.grid(row=3, column=0, padx=5, pady=5, sticky='e')
         self.time_entry = tk.Entry(root)
         self.time_entry.grid(row=3, column=1, padx=5, pady=5)
         self.time_entry.insert(0, self.settings.get("time", ""))
 
         # Time Zone Dropdown
         self.timezone_label = tk.Label(root, text="Time Zone:")
-        self.timezone_label.grid(row=4, column=0, padx=5, pady=5)
+        self.timezone_label.grid(row=4, column=0, padx=5, pady=5, sticky='e')
         self.timezone_combo = ttk.Combobox(root, values=pytz.all_timezones)
         self.timezone_combo.grid(row=4, column=1, padx=5, pady=5)
         self.timezone_combo.set(self.settings.get("timezone", "UTC"))
 
-        # Catalog Filters
+        # Catalog Filters Frame
         self.catalog_filters_label = tk.Label(root, text="Catalog Filters:")
         self.catalog_filters_label.grid(row=5, column=0, padx=5, pady=5, sticky='w')
+        
+        self.catalog_frame = tk.Frame(root)
+        self.catalog_frame.grid(row=6, column=0, columnspan=2, padx=5, pady=5, sticky='w')
+
         self.catalog_vars = {}
-        catalogs = ["Messier", "NGC", "IC", "Caldwell", "Abell", "Sharpless"]
+        catalogs = ["Messier", "NGC", "IC", "Caldwell", "Abell", "Sharpless", "LBN", "LDN", "PNG", "User"]
         for i, catalog in enumerate(catalogs):
             var = tk.BooleanVar(value=True)
-            chk = tk.Checkbutton(root, text=catalog, variable=var)
-            chk.grid(row=6 + (i % 3), column=(i // 3), padx=5, pady=5, sticky='w')
+            chk = tk.Checkbutton(self.catalog_frame, text=catalog, variable=var)
+            chk.grid(row=i // 5, column=i % 5, padx=5, pady=5, sticky='w')
             self.catalog_vars[catalog] = var
+
+        # RA/Dec Format Frame
+        self.ra_dec_frame = tk.Frame(root)
+        self.ra_dec_frame.grid(row=11, column=0, columnspan=3, pady=10)
+        
+        self.ra_dec_format = tk.StringVar(value="Degrees")
+        self.ra_dec_label = tk.Label(self.ra_dec_frame, text="RA/Dec Format:")
+        self.ra_dec_label.grid(row=0, column=0, padx=5, pady=5, sticky='w')
+        self.ra_dec_degrees = tk.Radiobutton(self.ra_dec_frame, text="Degrees", variable=self.ra_dec_format, value="Degrees")
+        self.ra_dec_degrees.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        self.ra_dec_hms = tk.Radiobutton(self.ra_dec_frame, text="H:M:S / D:M:S", variable=self.ra_dec_format, value="HMS")
+        self.ra_dec_hms.grid(row=0, column=2, padx=5, pady=5, sticky='w')
+
+        # Add trace to RA/Dec format to trigger updates
+        self.ra_dec_format.trace_add("write", self.update_ra_dec_format)
 
         # Button to calculate
         self.calculate_button = tk.Button(root, text="Calculate", command=self.start_calculation)
-        self.calculate_button.grid(row=9, column=0, columnspan=2, pady=10)
+        self.calculate_button.grid(row=10, column=0, columnspan=2, pady=10)
 
         # Settings Icon for Object Limit
         self.settings_button = tk.Button(root, text=u"⚙", command=self.open_settings)  # Unicode for gear icon ⚙
-        self.settings_button.grid(row=9, column=2, padx=5, pady=10)
+        self.settings_button.grid(row=10, column=2, padx=5, pady=10)
 
         # Status Label
         self.status_label = tk.Label(root, text="Status: Idle")
-        self.status_label.grid(row=10, column=0, columnspan=3, pady=5)
+        self.status_label.grid(row=12, column=0, columnspan=3, pady=5)
 
         # Local Sidereal Time Label
-        self.lst_label = tk.Label(root, text="Local Sidereal Time: N/A")
-        self.lst_label.grid(row=11, column=0, columnspan=3, pady=5)
+        self.lst_label = tk.Label(root, text="Local Sidereal Time: {:.3f}".format(0.0))
+        self.lst_label.grid(row=13, column=0, columnspan=3, pady=5)
 
         # Lunar Phase Image and Label
         self.lunar_phase_image_label = tk.Label(root)
         self.lunar_phase_image_label.grid(row=0, column=3, rowspan=4, padx=5, pady=5, sticky='ne')
         self.lunar_phase_label = tk.Label(root, text="Lunar Phase: N/A")
-        self.lunar_phase_label.grid(row=4, column=3, padx=5, pady=5, sticky='n')
+        self.lunar_phase_label.grid(row=4, column=3, padx=5, pady=5)
 
         # Treeview to display results
-        self.tree = ttk.Treeview(root, columns=("Name", "RA", "Dec", "Altitude", "Azimuth", "Minutes to Transit", "Before/After Transit", "Degrees from Moon", "Alt Name", "Type", "Magnitude", "Info"), show="headings")
+        self.tree = ttk.Treeview(root, columns=("Name", "RA", "Dec", "Altitude", "Azimuth", "Minutes to Transit", "Before/After Transit", "Degrees from Moon", "Alt Name", "Type", "Magnitude", "Size (arcmin)"), show="headings")
         for col in self.tree['columns']:
             self.tree.heading(col, text=col, command=lambda _col=col: self.treeview_sort_column(self.tree, _col, False))
         self.tree.grid(row=14, column=0, columnspan=3, pady=10, sticky='nsew')
@@ -137,7 +143,11 @@ class WhatsInMySky:
 
         # Add custom object button
         self.add_object_button = tk.Button(root, text="Add Custom Object", command=self.add_custom_object)
-        self.add_object_button.grid(row=9, column=3, padx=5, pady=10)
+        self.add_object_button.grid(row=10, column=3, padx=5, pady=10)
+
+        # Add save button to export Treeview data to CSV
+        self.save_button = tk.Button(root, text="Save to CSV", command=self.save_to_csv)
+        self.save_button.grid(row=11, column=3, padx=5, pady=10)
 
     def start_calculation(self):
         # Run the calculation in a separate thread to keep the GUI responsive
@@ -215,18 +225,17 @@ class WhatsInMySky:
             for _, row in df.iterrows():
                 sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
                 altaz = sky_coord.transform_to(altaz_frame)
-                altitudes.append(altaz.alt.deg)
-                azimuths.append(altaz.az.deg)
+                altitudes.append(round(altaz.alt.deg, 1))
+                azimuths.append(round(altaz.az.deg, 1))
 
                 # Calculate time difference to transit
-                ra = row['RA'] * u.deg.to(u.hourangle)  # Convert RA from degrees to hour angle
-                time_diff = ((ra - lst.hour) * u.hour) % (24 * u.hour)
-                minutes = time_diff.value * 60
-                if minutes > 720:
-                    minutes = 1440 - minutes
+                ra = Decimal(row['RA']) * Decimal(u.deg.to(u.hourangle))  # Convert RA from degrees to hour angle
+                time_diff = (ra - Decimal(lst.hour)) % Decimal(24)
+                if time_diff < 0:
                     before_after_transit.append("After")
                 else:
                     before_after_transit.append("Before")
+                minutes = round(abs(time_diff) * Decimal(60))
                 minutes_to_transit.append(minutes)
 
                 # Calculate angular distance from the moon
@@ -259,10 +268,17 @@ class WhatsInMySky:
 
             # Populate the treeview with calculated data
             for _, row in df.iterrows():
+                ra_display = row['RA']
+                dec_display = row['Dec']
+
+                if self.ra_dec_format.get() == "HMS":
+                    ra_display = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg).ra.to_string(unit=u.hour, sep=':')
+                    dec_display = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg).dec.to_string(unit=u.deg, sep=':')
+
                 values = [
                     row['Name'],
-                    row['RA'],
-                    row['Dec'],
+                    ra_display,
+                    dec_display,
                     row['Altitude'],
                     row['Azimuth'],
                     row['Minutes to Transit'],
@@ -297,7 +313,7 @@ class WhatsInMySky:
 
         # Determine lunar phase percentage
         phase_percentage = (1 - np.cos(np.radians(elongation))) / 2 * 100
-        phase_percentage = round(100 - phase_percentage)
+        phase_percentage = round(phase_percentage)
 
         # Select appropriate lunar phase image based on phase angle
         phase_folder = os.path.join(sys._MEIPASS, "imgs") if getattr(sys, 'frozen', False) else os.path.join(os.path.dirname(__file__), "imgs")
@@ -424,6 +440,50 @@ class WhatsInMySky:
             df = pd.concat([df, pd.DataFrame([new_object])], ignore_index=True)
             df.to_csv(catalog_file, index=False, encoding='ISO-8859-1')
             self.update_status(f"Added custom object: {name}")
+
+    def update_ra_dec_format(self, *args):
+        for item in self.tree.get_children():
+            row = self.tree.item(item, 'values')
+            ra_value = row[1]
+            dec_value = row[2]
+
+            try:
+                if self.ra_dec_format.get() == "HMS":
+                    ra_deg = float(ra_value)
+                    dec_deg = float(dec_value)
+                    sky_coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                    ra_display = sky_coord.ra.to_string(unit=u.hour, sep=':')
+                    dec_display = sky_coord.dec.to_string(unit=u.deg, sep=':')
+                else:
+                    ra_hms = SkyCoord(ra=ra_value, dec=dec_value, unit=(u.hourangle, u.deg))
+                    ra_display = round(ra_hms.ra.deg, 3)
+                    dec_display = round(ra_hms.dec.deg, 3)
+            except Exception as e:
+                # Handle invalid conversion and print the error for debugging
+                print(f"Conversion error: {e}")
+                ra_display = ra_value
+                dec_display = dec_value
+
+            values = list(row)
+            values[1] = ra_display
+            values[2] = dec_display
+            self.tree.item(item, values=values)
+
+
+    def save_to_csv(self):
+        # Ask user where to save the CSV file
+        file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if file_path:
+            # Extract data from Treeview
+            columns = self.tree['columns']
+            data = [columns]
+            for item in self.tree.get_children():
+                data.append(self.tree.item(item, 'values'))
+
+            # Convert data to DataFrame and save as CSV
+            df = pd.DataFrame(data[1:], columns=data[0])
+            df.to_csv(file_path, index=False)
+            self.update_status(f"Data saved to {file_path}")
 
 if __name__ == "__main__":
     root = tk.Tk()
