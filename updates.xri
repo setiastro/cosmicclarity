@@ -6,7 +6,7 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.11.2024.zip" sha1="dbf69440bc73b12a87a92534781427596eccbca6" type="script" releaseDate="20241011">
+      <package fileName="SetiAstroCosmicClarity10.11.2024_2.zip" sha1="86b2cae931f2b5c585aa69a39a40e5c6a8c40edd" type="script" releaseDate="20241011">
          <title>
         Cosmic Clarity Denoise and Sharpen
       </title>
@@ -18,4 +18,4 @@ Cosmic Clarity now natively supports Linear images.  Removed the checkbox from t
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-11T13:02:32.119Z" encoding="Base64">5AJ81Ne+z1W6AYq0HjDs+rS6TQDPQoNl6xrPFDL0ZeidQmFWx9kfx8T04pwBGIn/6E22T2B8T3a3K4bVBLQLCw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-11T13:41:03.607Z" encoding="Base64">hlvs5b4R4QY+gAiBGZzC8C5hcHSutdU03/MpKuxC8qyFzgf/XN4rHVORNLHRItX6hheZoSljKm0hHavRvfJuCw==</Signature>
