@@ -326,14 +326,61 @@ def replace_border(original_image, processed_image, border_size=5):
     return processed_image
 
 
+# Function to stretch an image
+def stretch_image(image):
+    """
+    Perform a linear stretch on the image.
+    """
+    original_min = np.min(image)
+    stretched_image = image - original_min
+    original_median = np.median(stretched_image, axis=(0, 1)) if image.ndim == 3 else np.median(stretched_image)
+    
+    target_median = 0.25
+    if image.ndim == 3:
+        median_color = np.mean(np.median(stretched_image, axis=(0, 1)))
+        stretched_image = ((median_color - 1) * target_median * stretched_image) / (
+            median_color * (target_median + stretched_image - 1) - target_median * stretched_image)
+    else:
+        image_median = np.median(stretched_image)
+        stretched_image = ((image_median - 1) * target_median * stretched_image) / (
+            image_median * (target_median + stretched_image - 1) - target_median * stretched_image)
+    
+    stretched_image = np.clip(stretched_image, 0, 1)
+    
+    return stretched_image, original_min, original_median
+
+# Function to unstretch an image
+def unstretch_image(image, original_median, original_min):
+    """
+    Undo the stretch to return the image to the original linear state.
+    """
+    if image.ndim == 3:
+        median_color = np.mean(np.median(image, axis=(0, 1)))
+        unstretched_image = ((median_color - 1) * original_median * image) / (
+            median_color * (original_median + image - 1) - original_median * image)
+    else:
+        image_median = np.median(image)
+        unstretched_image = ((image_median - 1) * original_median * image) / (
+            image_median * (original_median + image - 1) - original_median * image)
+    
+    unstretched_image += original_min
+    unstretched_image = np.clip(unstretched_image, 0, 1)
+    
+    return unstretched_image
+
+# Function to sharpen image
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, device, models):
     image = None
     file_extension = image_path.lower().split('.')[-1]
 
     try:
         if file_extension in ['tif', 'tiff']:
-            # Load the TIFF image as a 32-bit float directly
-            image = tiff.imread(image_path).astype(np.float32)
+            # Load the TIFF image
+            image = tiff.imread(image_path)
+            if image.dtype == np.uint16:  # If 16-bit, convert to 32-bit float
+                image = image.astype(np.float32) / 65535.0
+            else:
+                image = image.astype(np.float32)
             if len(image.shape) == 2:  # Grayscale image
                 image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
         else:
@@ -343,11 +390,14 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         print(f"Error reading image {image_path}: {e}")
         return None
 
+    # Stretch the image
+    stretched_image, original_min, original_median = stretch_image(image)
+
     # Extract luminance (for color images) or handle grayscale images directly
-    if len(image.shape) == 3:
-        luminance, cb, cr = extract_luminance(Image.fromarray((image * 255).astype(np.uint8)))
+    if len(stretched_image.shape) == 3:
+        luminance, cb, cr = extract_luminance(Image.fromarray((stretched_image * 255).astype(np.uint8)))
     else:
-        luminance = image
+        luminance = stretched_image
 
     chunks = split_image_into_chunks_with_overlap(luminance, chunk_size=256, overlap=64)
     total_chunks = len(chunks)
@@ -422,6 +472,9 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         # For grayscale images, the luminance is the image itself
         sharpened_image = sharpened_luminance
 
+    # Unstretch the image to return to the original linear state
+    sharpened_image = unstretch_image(sharpened_image, original_median, original_min)
+
     # Replace the 5-pixel border from the original image
     sharpened_image = replace_border(image, sharpened_image)
 
@@ -435,9 +488,9 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#        ___     __      ___       __                              #
  *#       / __/___/ /__   / _ | ___ / /________                      #
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
- *#     /___/\__/_//_/  /_/ |_/___/\__/_/  \___/                     #
+ *#     /___/\__/\//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V3.2                       # 
+ *#              Cosmic Clarity - Sharpen V4.0                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
