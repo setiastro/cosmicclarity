@@ -113,7 +113,6 @@ def extract_luminance(image):
     return np.array(y).astype(np.float32) / 255.0, cb, cr
 
 
-
 # Function to show progress during chunk processing
 def show_progress(current, total):
     progress_percentage = (current / total) * 100
@@ -291,7 +290,6 @@ def get_user_input():
 
 
 
-
 # Function to show progress during chunk processing
 def show_progress(current, total):
     progress_percentage = (current / total) * 100
@@ -390,8 +388,13 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         print(f"Error reading image {image_path}: {e}")
         return None
 
-    # Stretch the image
-    stretched_image, original_min, original_median = stretch_image(image)
+    # Check if the image needs stretching
+    stretch_needed = np.median(image) < 0.125
+    if stretch_needed:
+        # Stretch the image
+        stretched_image, original_min, original_median = stretch_image(image)
+    else:
+        stretched_image = image
 
     # Extract luminance (for color images) or handle grayscale images directly
     if len(stretched_image.shape) == 3:
@@ -418,7 +421,7 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
     }
 
     # Apply non-stellar sharpening if applicable
-    if nonstellar_strength is not None:
+    if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
         for idx, (chunk, i, j, is_edge) in enumerate(chunks):
             chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
 
@@ -472,8 +475,9 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         # For grayscale images, the luminance is the image itself
         sharpened_image = sharpened_luminance
 
-    # Unstretch the image to return to the original linear state
-    sharpened_image = unstretch_image(sharpened_image, original_median, original_min)
+    # Unstretch the image to return to the original linear state if stretched
+    if stretch_needed:
+        sharpened_image = unstretch_image(sharpened_image, original_median, original_min)
 
     # Replace the 5-pixel border from the original image
     sharpened_image = replace_border(image, sharpened_image)
@@ -482,15 +486,14 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
 
 
-
 def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_strength=None, stellar_amount=None, use_gpu=True):
     print((r"""
  *#        ___     __      ___       __                              #
  *#       / __/___/ /__   / _ | ___ / /________                      #
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
- *#     /___/\__/\//_/  /_/ |_/___/\__/_/  \___/                     #
+ *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V4.0                       # 
+ *#              Cosmic Clarity - Sharpen V4.1                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
