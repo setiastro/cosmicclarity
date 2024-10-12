@@ -377,6 +377,8 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
             image = tiff.imread(image_path)
             if image.dtype == np.uint16:  # If 16-bit, convert to 32-bit float
                 image = image.astype(np.float32) / 65535.0
+            elif image.dtype == np.uint32:  # If 32-bit unsigned, convert to 32-bit float
+                image = image.astype(np.float32) / 4294967295.0
             else:
                 image = image.astype(np.float32)
             if len(image.shape) == 2:  # Grayscale image
