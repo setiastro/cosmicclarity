@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.11.2024_2.zip" sha1="86b2cae931f2b5c585aa69a39a40e5c6a8c40edd" type="script" releaseDate="20241011">
+      <package fileName="SetiAstroCosmicClarity10.12.2024.zip" sha1="04770989665f6d7d27491296101e478d5e6ce44b" type="script" releaseDate="20241012">
          <title>
         Cosmic Clarity Denoise and Sharpen
       </title>
          <description>
             <p>
-Cosmic Clarity now natively supports Linear images.  Removed the checkbox from the PI script where the user chose if the image was linear or not as it is no longer needed.  Be sure to download the latest Cosmic Clarity www.setiastro.com
+Cosmic Clarity corrected a bug that had &quot;use gpu&quot; turned on all the time in the sharpen script and now correctly reflects the users input.  Be sure to download the latest Cosmic Clarity www.setiastro.com
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-11T13:41:03.607Z" encoding="Base64">hlvs5b4R4QY+gAiBGZzC8C5hcHSutdU03/MpKuxC8qyFzgf/XN4rHVORNLHRItX6hheZoSljKm0hHavRvfJuCw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-12T17:52:00.496Z" encoding="Base64">nLaT6YbY7t6ux/nAz6PyoifqIJMj9GYmvUfLkJbbg4Ap6PP3qjXxE8bojaxpzAZxsB8MBCqLmSEnPqieffFWDw==</Signature>
