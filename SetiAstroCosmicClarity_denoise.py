@@ -283,51 +283,20 @@ def unstretch_image(image, original_median, original_min):
     unstretched_image = np.clip(unstretched_image, 0, 1)
     return unstretched_image
 
-# Main denoise function for an image
-def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
-    try:
-        # Load the image based on its extension
-        file_extension = os.path.splitext(image_path)[1].lower()
-        if file_extension in ['.tif', '.tiff']:
-            image = tiff.imread(image_path)
-            if image.dtype == np.uint16:  # If 16-bit, convert to 32-bit float
-                image = image.astype(np.float32) / 65535.0
-            else:
-                image = image.astype(np.float32)
-        else:
-            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load as 32-bit float for PNG
+# Function to add a border of median value around the image
+def add_border(image, border_size=5):
+    median_value = np.median(image)
+    if len(image.shape) == 2:
+        return np.pad(image, ((border_size, border_size), (border_size, border_size)), 'constant', constant_values=median_value)
+    else:
+        return np.pad(image, ((border_size, border_size), (border_size, border_size), (0, 0)), 'constant', constant_values=median_value)
 
-        # Stretch the image
-        stretched_image, original_min, original_median = stretch_image(image)
-
-        # Check if the image is grayscale (mono) or color
-        if len(image.shape) == 2:  # Grayscale image
-            print("Detected grayscale (mono) image. Denoising single channel directly.")
-            denoised_image = denoise_channel(stretched_image, device, model)
-            denoised_image = blend_images(stretched_image, denoised_image, denoise_strength)
-            denoised_image = replace_border(stretched_image, denoised_image)
-        else:
-            print("Detected color image.")
-            if denoise_mode == 'luminance':
-                print("Denoising Luminance (Y) channel only...")
-                y, cb, cr = extract_luminance(stretched_image)
-                denoised_y = denoise_channel(y, device, model)
-                denoised_y = blend_images(y, denoised_y, denoise_strength)
-                denoised_y = replace_border(y, denoised_y)
-                denoised_image = merge_luminance(denoised_y, cb, cr)
-            else:
-                print("Denoising full RGB channels...")
-                denoised_channels = [blend_images(stretched_image[:, :, c], denoise_channel(stretched_image[:, :, c], device, model), denoise_strength)
-                                     for c in range(3)]
-                denoised_image = np.stack([replace_border(stretched_image[:, :, c], denoised_channels[c]) for c in range(3)], axis=-1)
-
-        # Unstretch the image back to its original linear state
-        denoised_image = unstretch_image(denoised_image, original_median, original_min)
-        return denoised_image
-
-    except Exception as e:
-        print(f"Error reading image {image_path}: {e}")
-        return None
+# Function to remove the border added around the image
+def remove_border(image, border_size=5):
+    if len(image.shape) == 2:
+        return image[border_size:-border_size, border_size:-border_size]
+    else:
+        return image[border_size:-border_size, border_size:-border_size, :]
 
 # Function to denoise a channel (Y, Cb, Cr)
 def denoise_channel(channel, device, model):
@@ -354,6 +323,67 @@ def denoise_channel(channel, device, model):
     denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
     return denoised_channel
 
+# Main denoise function for an image
+def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
+    try:
+        # Load the image based on its extension
+        file_extension = os.path.splitext(image_path)[1].lower()
+        if file_extension in ['.tif', '.tiff']:
+            image = tiff.imread(image_path)
+            if image.dtype == np.uint16:  # If 16-bit, convert to 32-bit float
+                image = image.astype(np.float32) / 65535.0
+            elif image.dtype == np.uint32:  # If 32-bit unsigned, convert to 32-bit float
+                image = image.astype(np.float32) / 4294967295.0
+            else:
+                image = image.astype(np.float32)
+        else:
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load as 32-bit float for PNG
+
+        # Add a border around the image with the median value
+        image_with_border = add_border(image, border_size=5)
+
+        # Check if the image needs stretching based on its median value
+        original_median = np.median(image_with_border)
+        if original_median < 0.125:
+            # Stretch the image
+            stretched_image, original_min, original_median = stretch_image(image_with_border)
+        else:
+            stretched_image = image_with_border
+            original_min = None
+
+        # Check if the image is grayscale (mono) or color
+        if len(image.shape) == 2:  # Grayscale image
+            print("Detected grayscale (mono) image. Denoising single channel directly.")
+            denoised_image = denoise_channel(stretched_image, device, model)
+            denoised_image = blend_images(stretched_image, denoised_image, denoise_strength)
+        else:
+            print("Detected color image.")
+            if denoise_mode == 'luminance':
+                print("Denoising Luminance (Y) channel only...")
+                y, cb, cr = extract_luminance(stretched_image)
+                denoised_y = denoise_channel(y, device, model)
+                denoised_y = blend_images(y, denoised_y, denoise_strength)
+                denoised_image = merge_luminance(denoised_y, cb, cr)
+            else:
+                print("Denoising full RGB channels...")
+                denoised_channels = [blend_images(stretched_image[:, :, c], denoise_channel(stretched_image[:, :, c], device, model), denoise_strength)
+                                     for c in range(3)]
+                denoised_image = np.stack(denoised_channels, axis=-1)
+
+        # Unstretch the image back to its original linear state if it was stretched
+        if original_min is not None:
+            denoised_image = unstretch_image(denoised_image, original_median, original_min)
+
+        # Remove the border added around the image
+        denoised_image = remove_border(denoised_image, border_size=5)
+        
+        return denoised_image
+
+    except Exception as e:
+        print(f"Error reading image {image_path}: {e}")
+        return None
+
+
 # Main process for denoising images
 def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
     print((r"""
@@ -362,7 +392,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/_/  \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V4.0                       # 
+ *#              Cosmic Clarity - Denoise V4.1                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
