@@ -227,9 +227,15 @@ def train_model(model, train_loader, num_epochs, model_save_path):
     # Save the model
     torch.save(model.state_dict(), model_save_path)
 
-# Instantiate models for noisey level
-model_ns = DenoiseCNN()
 
-# Train the model with different epochs
-print("Training denoise model (20 epochs)...")
-train_model(model_ns, train_loader_ns, 20, 'denoise_cnn.pth')
+def main():
+    # Instantiate models for noisey level
+    model_ns = DenoiseCNN()
+
+    # Train the model with different epochs
+    print("Training denoise model (20 epochs)...")
+    train_model(model_ns, train_loader_ns, 20, 'denoise_cnn.pth')
+
+
+if __name__ == "__main__":
+    main()

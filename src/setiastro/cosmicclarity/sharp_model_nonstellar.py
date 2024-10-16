@@ -204,21 +204,26 @@ def train_model(model, train_loader, num_epochs, model_save_path):
     # Save the model
     torch.save(model.state_dict(), model_save_path)
 
-# Instantiate models for each blur radius
-model_ns_radius_1 = SharpeningCNN()
-model_ns_radius_2 = SharpeningCNN()
-model_ns_radius_4 = SharpeningCNN()
-model_ns_radius_8 = SharpeningCNN()
+def main():
+    # Instantiate models for each blur radius
+    model_ns_radius_1 = SharpeningCNN()
+    model_ns_radius_2 = SharpeningCNN()
+    model_ns_radius_4 = SharpeningCNN()
+    model_ns_radius_8 = SharpeningCNN()
 
-# Train each model with different epochs
-print("Training non-stellar model for blur radius 1 (6 epochs)...")
-train_model(model_ns_radius_1, train_loader_ns_1, 6, 'nonstellar_sharp_cnn_radius_1.pth')
+    # Train each model with different epochs
+    print("Training non-stellar model for blur radius 1 (6 epochs)...")
+    train_model(model_ns_radius_1, train_loader_ns_1, 6, 'nonstellar_sharp_cnn_radius_1.pth')
 
-print("Training non-stellar model for blur radius 2 (12 epochs)...")
-train_model(model_ns_radius_2, train_loader_ns_2, 12, 'nonstellar_sharp_cnn_radius_2.pth')
+    print("Training non-stellar model for blur radius 2 (12 epochs)...")
+    train_model(model_ns_radius_2, train_loader_ns_2, 12, 'nonstellar_sharp_cnn_radius_2.pth')
 
-print("Training non-stellar model for blur radius 4 (18 epochs)...")
-train_model(model_ns_radius_4, train_loader_ns_4, 18, 'nonstellar_sharp_cnn_radius_4.pth')
+    print("Training non-stellar model for blur radius 4 (18 epochs)...")
+    train_model(model_ns_radius_4, train_loader_ns_4, 18, 'nonstellar_sharp_cnn_radius_4.pth')
 
-print("Training non-stellar model for blur radius 8 (20 epochs)...")
-train_model(model_ns_radius_8, train_loader_ns_8, 20, 'nonstellar_sharp_cnn_radius_8.pth')
+    print("Training non-stellar model for blur radius 8 (20 epochs)...")
+    train_model(model_ns_radius_8, train_loader_ns_8, 20, 'nonstellar_sharp_cnn_radius_8.pth')
+
+
+if __name__ == "__main__":
+    main()

@@ -159,9 +159,14 @@ def train_model(model, train_loader, num_epochs, model_save_path):
     torch.save(model.state_dict(), model_save_path)
 
 
-# Instantiate the model for blur radius 1
-model_radius_1 = SharpeningCNN()
+def main():
+    # Instantiate the model for blur radius 1
+    model_radius_1 = SharpeningCNN()
 
-# Train the model for 10 epochs
-print("Training model for blur radius 1 (10 epochs)...")
-train_model(model_radius_1, train_loader_1, 10, 'sharp_cnn_radius_1.pth')
+    # Train the model for 10 epochs
+    print("Training model for blur radius 1 (10 epochs)...")
+    train_model(model_radius_1, train_loader_1, 10, 'sharp_cnn_radius_1.pth')
+
+
+if __name__ == "__main__":
+    main()
