@@ -549,29 +549,33 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
             print(f"Saved sharpened image to: {output_image_path}")
 
 
+def main():
+    # Define input and output directories for PyInstaller
+    input_dir = os.path.join(exe_dir, 'input')
+    output_dir = os.path.join(exe_dir, 'output')
 
-# Define input and output directories for PyInstaller
-input_dir = os.path.join(exe_dir, 'input')
-output_dir = os.path.join(exe_dir, 'output')
+    # Ensure the input and output directories exist
+    if not os.path.exists(input_dir):
+        os.makedirs(input_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-# Ensure the input and output directories exist
-if not os.path.exists(input_dir):
-    os.makedirs(input_dir)
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+    # Add argument parsing for batch/script execution
+    parser = argparse.ArgumentParser(description="Stellar and Non-Stellar Sharpening Tool")
+    parser.add_argument('--sharpening_mode', type=str, choices=["Stellar Only", "Non-Stellar Only", "Both"],
+                        help="Choose the sharpening mode: Stellar Only, Non-Stellar Only, Both")
+    parser.add_argument('--nonstellar_strength', type=float, help="Non-Stellar sharpening strength (1-8)")
+    parser.add_argument('--stellar_amount', type=float, default=0.9, help="Stellar sharpening amount (0-1)")
+    parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
 
-# Add argument parsing for batch/script execution
-parser = argparse.ArgumentParser(description="Stellar and Non-Stellar Sharpening Tool")
-parser.add_argument('--sharpening_mode', type=str, choices=["Stellar Only", "Non-Stellar Only", "Both"],
-                    help="Choose the sharpening mode: Stellar Only, Non-Stellar Only, Both")
-parser.add_argument('--nonstellar_strength', type=float, help="Non-Stellar sharpening strength (1-8)")
-parser.add_argument('--stellar_amount', type=float, default=0.9, help="Stellar sharpening amount (0-1)")
-parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
+    args = parser.parse_args()
 
-args = parser.parse_args()
+    # Determine whether to use GPU based on command-line argument
+    use_gpu = not args.disable_gpu  # If --disable_gpu is passed, set use_gpu to False
 
-# Determine whether to use GPU based on command-line argument
-use_gpu = not args.disable_gpu  # If --disable_gpu is passed, set use_gpu to False
+    # Pass arguments if provided, or fall back to user input if no command-line arguments are provided
+    process_images(input_dir, output_dir, args.sharpening_mode, args.nonstellar_strength, args.stellar_amount, use_gpu)
 
-# Pass arguments if provided, or fall back to user input if no command-line arguments are provided
-process_images(input_dir, output_dir, args.sharpening_mode, args.nonstellar_strength, args.stellar_amount, use_gpu)
+
+if __name__ == "__main__":
+    main()

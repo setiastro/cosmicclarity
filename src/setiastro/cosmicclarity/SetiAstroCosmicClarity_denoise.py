@@ -431,25 +431,31 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
                 denoised_image_pil.save(output_image_path)
                 print(f"Saved 8-bit denoised image to: {output_image_path}")
 
-# Define input and output directories
-input_dir = os.path.join(exe_dir, 'input')
-output_dir = os.path.join(exe_dir, 'output')
 
-if not os.path.exists(input_dir):
-    os.makedirs(input_dir)
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+def main():
+    # Define input and output directories
+    input_dir = os.path.join(exe_dir, 'input')
+    output_dir = os.path.join(exe_dir, 'output')
 
-# Add argument parsing for batch/script execution
-parser = argparse.ArgumentParser(description="Cosmic Clarity Denoise Tool")
-parser.add_argument('--denoise_strength', type=float, help="Denoise strength (0-1)")
-parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
-parser.add_argument('--denoise_mode', type=str, choices=['luminance', 'full'], default='luminance', help="Denoise mode: luminance or full YCbCr denoising")
+    if not os.path.exists(input_dir):
+        os.makedirs(input_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-args = parser.parse_args()
+    # Add argument parsing for batch/script execution
+    parser = argparse.ArgumentParser(description="Cosmic Clarity Denoise Tool")
+    parser.add_argument('--denoise_strength', type=float, help="Denoise strength (0-1)")
+    parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
+    parser.add_argument('--denoise_mode', type=str, choices=['luminance', 'full'], default='luminance', help="Denoise mode: luminance or full YCbCr denoising")
 
-# Determine whether to use GPU based on command-line argument
-use_gpu = not args.disable_gpu
+    args = parser.parse_args()
 
-# Pass arguments if provided, or fall back to defaults
-process_images(input_dir, output_dir, args.denoise_strength, use_gpu, args.denoise_mode)
+    # Determine whether to use GPU based on command-line argument
+    use_gpu = not args.disable_gpu
+
+    # Pass arguments if provided, or fall back to defaults
+    process_images(input_dir, output_dir, args.denoise_strength, use_gpu, args.denoise_mode)
+
+
+if "__name__" == "__main__":
+    main()

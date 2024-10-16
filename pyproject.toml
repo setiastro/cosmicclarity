@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "setiastro-cosmic-clarity"
+version = "0.1.0"
+description = "AI Based Sharpening and Denoising."
+authors = ["Seti Astro <frank@setiastro.com>"]
+readme = "README.md"
+packages = [
+    { include = "setiastro", from = "src" }
+]
+include = ["models/*"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = "^2.4.1"
+numpy = "^2.1.2"
+tifffile = "^2024.9.20"
+pillow = "^10.4.0"
+tk = "^0.1.0"
+argparse = "^1.4.0"
+torchvision = "^0.19.1"
+
+[tool.poetry.scripts]
+SetiAstroCosmicClarity = "setiastro.cosmicclarity.SetiAstroCosmicClarity:main"
+SetiAstroCosmicClarity_denoise = "setiastro.cosmicclarity.SetiAstroCosmicClarity_denoise:main"
+denoise_model = "setiastro.cosmicclarity.denoise_model:main"
+sharp_model_nonstellar = "setiastro.cosmicclarity.sharp_model_nonstellar:main"
+sharp_model_normal = "setiastro.cosmicclarity.sharp_model_normal:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
