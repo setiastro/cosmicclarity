@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.12.2024.zip" sha1="04770989665f6d7d27491296101e478d5e6ce44b" type="script" releaseDate="20241012">
+      <package fileName="SetiAstroCosmicClarity10.17.2024.zip" sha1="da3d41375bf4bbb0b24ca8bed608c7cf2ab71f9d" type="script" releaseDate="20241017">
          <title>
         Cosmic Clarity Denoise and Sharpen
       </title>
          <description>
             <p>
-Cosmic Clarity corrected a bug that had &quot;use gpu&quot; turned on all the time in the sharpen script and now correctly reflects the users input.  Be sure to download the latest Cosmic Clarity www.setiastro.com
+Cosmic Clarity version 5 is out now.  This script update allows interface with the newest version.  Includes FITS support, a non-stellar amount ie how much effect the sharpening should have, and the ability to sharpen seperate RGB channels.  Version 5 utilizes a larger more detailed neural architecture and handles a broader range of aberrations, noise patters, and structures.  Be sure to download the latest Cosmic Clarity www.setiastro.com
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-12T17:52:00.496Z" encoding="Base64">nLaT6YbY7t6ux/nAz6PyoifqIJMj9GYmvUfLkJbbg4Ap6PP3qjXxE8bojaxpzAZxsB8MBCqLmSEnPqieffFWDw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-17T16:03:08.321Z" encoding="Base64">MPVLRH2gGv+gTpAotINmKG0IsljweziBjIOiJufa5bXaIq0jaxt/JMSs+xd2bjDPyX9+CPpo1LJjGiFEzIoGDQ==</Signature>
