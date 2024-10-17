@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 import tifffile as tiff
+from astropy.io import fits
 from PIL import Image
 import tkinter as tk
 from tkinter import simpledialog, messagebox
@@ -23,13 +24,23 @@ class DenoiseCNN(nn.Module):
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer for deeper feature learning
+            nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 3rd layer (32 -> 64 feature maps)
             nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
+            nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
             nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
+            nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 5th layer (128 -> 256 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),  # Additional layer
             nn.ReLU()
         )
         
@@ -37,11 +48,19 @@ class DenoiseCNN(nn.Module):
         self.decoder = nn.Sequential(
             nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 1st deconvolutional layer (256 -> 128 feature maps)
             nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
+            nn.ReLU(),
             nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 2nd deconvolutional layer (128 -> 64 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
             nn.ReLU(),
             nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 3rd deconvolutional layer (64 -> 32 feature maps)
             nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
+            nn.ReLU(),
             nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 4th deconvolutional layer (32 -> 16 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer
             nn.ReLU(),
             nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
@@ -52,6 +71,7 @@ class DenoiseCNN(nn.Module):
         x = self.decoder(x)
         return x
 
+
 # Get the directory of the executable or the script location
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
@@ -61,7 +81,7 @@ def load_model(exe_dir, use_gpu=True):
     print(f"Using device: {device}")
 
     denoise_model = DenoiseCNN()
-    denoise_model.load_state_dict(torch.load(os.path.join(exe_dir, 'denoise_cnn.pth'), map_location=device))
+    denoise_model.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_denoise_cnn.pth'), map_location=device))
 
     denoise_model.eval()
     denoise_model.to(device)
@@ -162,11 +182,9 @@ def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border
     stitched_image /= np.maximum(weight_map, 1)  # Avoid division by zero
     return stitched_image
 
-
 # Function to blend two images (before and after)
 def blend_images(before, after, amount):
     return (1 - amount) * before + amount * after
-
 
 # Function to get user input for denoise strength (Interactive)
 def get_user_input():
@@ -214,12 +232,10 @@ def get_user_input():
 
     return use_gpu, denoise_strength, denoise_mode
 
-
 # Function to show progress during chunk processing
 def show_progress(current, total):
     progress_percentage = (current / total) * 100
     print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r', flush=True)
-
 
 # Function to replace the 5-pixel border from the original image into the processed image
 def replace_border(original_image, processed_image, border_size=5):
@@ -336,6 +352,15 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 image = image.astype(np.float32) / 4294967295.0
             else:
                 image = image.astype(np.float32)
+        elif file_extension in ['.fits', '.fit']:
+            # Load the FITS image
+            with fits.open(image_path) as hdul:
+                image_data = hdul[0].data.astype(np.float32)
+                image = image_data / np.max(image_data)  # Normalize to [0, 1]
+                if len(image.shape) == 2:  # Grayscale image
+                    image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
+                else:
+                    is_mono = False
         else:
             image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load as 32-bit float for PNG
 
@@ -383,16 +408,15 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         print(f"Error reading image {image_path}: {e}")
         return None
 
-
 # Main process for denoising images
 def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
     print((r"""
  *#        ___     __      ___       __                              #
  *#       / __/___/ /__   / _ | ___ / /________                      #
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
- *#     /___/\__/\//_/  /_/ |_/___/\__/_/  \___/                     #
+ *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V4.1                       # 
+ *#              Cosmic Clarity - Denoise V5.0                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -423,6 +447,11 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
             if file_extension in ['.tif', '.tiff']:
                 output_image_path = os.path.join(output_dir, output_image_name + ".tif")
                 tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
+                print(f"Saved 32-bit denoised image to: {output_image_path}")
+            elif file_extension in ['.fits', '.fit']:
+                output_image_path = os.path.join(output_dir, output_image_name + ".fits")
+                hdu = fits.PrimaryHDU(denoised_image[:, :, 0])  # Save only the first channel for grayscale
+                hdu.writeto(output_image_path, overwrite=True)
                 print(f"Saved 32-bit denoised image to: {output_image_path}")
             else:
                 output_image_path = os.path.join(output_dir, output_image_name + ".png")
