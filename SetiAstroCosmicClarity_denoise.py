@@ -21,55 +21,101 @@ class DenoiseCNN(nn.Module):
         super(DenoiseCNN, self).__init__()
         
         # Encoder (down-sampling path)
-        self.encoder = nn.Sequential(
+        self.encoder1 = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer for deeper feature learning
-            nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer (16 -> 16)
+            nn.ReLU()
+        )
+        self.encoder2 = nn.Sequential(
             nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer (32 -> 32)
+            nn.ReLU()
+        )
+        self.encoder3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 3rd layer (32 -> 64 feature maps)
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional layer (64 -> 64) with dilation
+            nn.ReLU()
+        )
+        self.encoder4 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer (128 -> 128)
+            nn.ReLU()
+        )
+        self.encoder5 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2),  # 5th layer (128 -> 256) with dilation
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 5th layer (128 -> 256 feature maps)
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(256, 256, kernel_size=3, padding=2, dilation=2),  # Additional layer (256 -> 256) with dilation
             nn.ReLU()
         )
         
-        # Decoder (up-sampling path)
-        self.decoder = nn.Sequential(
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 1st deconvolutional layer (256 -> 128 feature maps)
+        # Decoder (up-sampling path with skip connections)
+        self.decoder5 = nn.Sequential(
+            nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1),  # 256 + 128 feature maps from encoder4
             nn.ReLU(),
             nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 2nd deconvolutional layer (128 -> 64 feature maps)
+            nn.ReLU()
+        )
+        self.decoder4 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # 128 + 64 feature maps from encoder3
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 3rd deconvolutional layer (64 -> 32 feature maps)
+            nn.ReLU()
+        )
+        self.decoder3 = nn.Sequential(
+            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
             nn.ReLU(),
             nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
-            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 4th deconvolutional layer (32 -> 16 feature maps)
+            nn.ReLU()
+        )
+        self.decoder2 = nn.Sequential(
+            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
             nn.ReLU(),
             nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
+            nn.ReLU()
+        )
+        self.decoder1 = nn.Sequential(
             nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
     def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+        # Encoder
+        e1 = self.encoder1(x)  # First encoding block
+        e2 = self.encoder2(e1)  # Second encoding block
+        e3 = self.encoder3(e2)  # Third encoding block
+        e4 = self.encoder4(e3)  # Fourth encoding block
+        e5 = self.encoder5(e4)  # Fifth encoding block
+        
+        # Decoder with skip connections
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
+        d1 = self.decoder1(d2)  # Final output layer
+
+        return d1
+
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.encoder1(x)  # First encoding block
+        e2 = self.encoder2(e1)  # Second encoding block
+        e3 = self.encoder3(e2)  # Third encoding block
+        e4 = self.encoder4(e3)  # Fourth encoding block
+        e5 = self.encoder5(e4)  # Fifth encoding block
+        
+        # Decoder with skip connections
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
+        d1 = self.decoder1(d2)  # Final output layer
+
+        return d1
 
 
 # Get the directory of the executable or the script location
@@ -315,6 +361,7 @@ def remove_border(image, border_size=5):
         return image[border_size:-border_size, border_size:-border_size, :]
 
 # Function to denoise a channel (Y, Cb, Cr)
+# Function to denoise a channel (Y, Cb, Cr)
 def denoise_channel(channel, device, model):
     # Split channel into chunks
     chunk_size = 256
@@ -335,6 +382,7 @@ def denoise_channel(channel, device, model):
         # Show progress update
         show_progress(idx + 1, len(chunks))
 
+    print("")  # Add a newline after denoising channel progress
     # Stitch the chunks back together
     denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
     return denoised_channel
@@ -386,14 +434,22 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             if denoise_mode == 'luminance':
                 print("Denoising Luminance (Y) channel only...")
                 y, cb, cr = extract_luminance(stretched_image)
+                print("Denoising Luminance Channel:")
                 denoised_y = denoise_channel(y, device, model)
                 denoised_y = blend_images(y, denoised_y, denoise_strength)
                 denoised_image = merge_luminance(denoised_y, cb, cr)
             else:
                 print("Denoising full RGB channels...")
-                denoised_channels = [blend_images(stretched_image[:, :, c], denoise_channel(stretched_image[:, :, c], device, model), denoise_strength)
-                                     for c in range(3)]
-                denoised_image = np.stack(denoised_channels, axis=-1)
+                print("Denoising Red Channel:")
+                denoised_r = denoise_channel(stretched_image[:, :, 0], device, model)
+                denoised_r = blend_images(stretched_image[:, :, 0], denoised_r, denoise_strength)
+                print("Denoising Green Channel:")
+                denoised_g = denoise_channel(stretched_image[:, :, 1], device, model)
+                denoised_g = blend_images(stretched_image[:, :, 1], denoised_g, denoise_strength)
+                print("Denoising Blue Channel:")
+                denoised_b = denoise_channel(stretched_image[:, :, 2], device, model)
+                denoised_b = blend_images(stretched_image[:, :, 2], denoised_b, denoise_strength)
+                denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
 
         # Unstretch the image back to its original linear state if it was stretched
         if original_min is not None:
@@ -416,7 +472,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.0                       # 
+ *#              Cosmic Clarity - Denoise V5.2                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #

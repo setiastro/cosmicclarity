@@ -17,61 +17,106 @@ from tkinter import filedialog
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
 
-# Define the SharpeningCNN model with adjusted convolutional layers
 class SharpeningCNN(nn.Module):
     def __init__(self):
         super(SharpeningCNN, self).__init__()
         
         # Encoder (down-sampling path)
-        self.encoder = nn.Sequential(
+        self.encoder1 = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer for deeper feature learning
-            nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer (16 -> 16)
+            nn.ReLU()
+        )
+        self.encoder2 = nn.Sequential(
             nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer (32 -> 32)
+            nn.ReLU()
+        )
+        self.encoder3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 3rd layer (32 -> 64 feature maps)
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional layer (64 -> 64) with dilation
+            nn.ReLU()
+        )
+        self.encoder4 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer (128 -> 128)
+            nn.ReLU()
+        )
+        self.encoder5 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2),  # 5th layer (128 -> 256) with dilation
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 5th layer (128 -> 256 feature maps)
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(256, 256, kernel_size=3, padding=2, dilation=2),  # Additional layer (256 -> 256) with dilation
             nn.ReLU()
         )
         
-        # Decoder (up-sampling path)
-        self.decoder = nn.Sequential(
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),  # 1st deconvolutional layer (256 -> 128 feature maps)
+        # Decoder (up-sampling path with skip connections)
+        self.decoder5 = nn.Sequential(
+            nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1),  # 256 + 128 feature maps from encoder4
             nn.ReLU(),
             nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),  # 2nd deconvolutional layer (128 -> 64 feature maps)
+            nn.ReLU()
+        )
+        self.decoder4 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # 128 + 64 feature maps from encoder3
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),  # 3rd deconvolutional layer (64 -> 32 feature maps)
+            nn.ReLU()
+        )
+        self.decoder3 = nn.Sequential(
+            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
             nn.ReLU(),
             nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
-            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # 4th deconvolutional layer (32 -> 16 feature maps)
+            nn.ReLU()
+        )
+        self.decoder2 = nn.Sequential(
+            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
             nn.ReLU(),
             nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU(),
+            nn.ReLU()
+        )
+        self.decoder1 = nn.Sequential(
             nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
     def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+        # Encoder
+        e1 = self.encoder1(x)  # First encoding block
+        e2 = self.encoder2(e1)  # Second encoding block
+        e3 = self.encoder3(e2)  # Third encoding block
+        e4 = self.encoder4(e3)  # Fourth encoding block
+        e5 = self.encoder5(e4)  # Fifth encoding block
+        
+        # Decoder with skip connections
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
+        d1 = self.decoder1(d2)  # Final output layer
+
+        return d1
+
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.encoder1(x)  # First encoding block
+        e2 = self.encoder2(e1)  # Second encoding block
+        e3 = self.encoder3(e2)  # Third encoding block
+        e4 = self.encoder4(e3)  # Fourth encoding block
+        e5 = self.encoder5(e4)  # Fifth encoding block
+        
+        # Decoder with skip connections
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
+        d1 = self.decoder1(d2)  # Final output layer
+
+        return d1
 
 
 # Get the directory of the executable or the script location
@@ -448,8 +493,11 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
     # If sharpening channels separately, split the image into R, G, and B channels
     if sharpen_channels_separately and len(stretched_image.shape) == 3 and not is_mono:
         r_channel, g_channel, b_channel = stretched_image[:, :, 0], stretched_image[:, :, 1], stretched_image[:, :, 2]
+        print("Sharpening Red Channel:")
         sharpened_r = sharpen_channel(r_channel, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models)
+        print("Sharpening Green Channel:")
         sharpened_g = sharpen_channel(g_channel, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models)
+        print("Sharpening Blue Channel:")
         sharpened_b = sharpen_channel(b_channel, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models)
         sharpened_image = np.stack([sharpened_r, sharpened_g, sharpened_b], axis=-1)
     else:
@@ -479,6 +527,7 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
         # Apply non-stellar sharpening if applicable
         if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
+            print("Non-Stellar Sharpening:")
             for idx, (chunk, i, j, is_edge) in enumerate(chunks):
                 chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
 
@@ -498,8 +547,9 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                         sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
 
                 denoised_chunks.append((sharpened_chunk, i, j, is_edge))
-                show_progress(idx + 1, total_chunks)  # Update progress after processing each chunk
+                show_progress(idx + 1, total_chunks)
 
+            print("")  # Add a newline after non-stellar sharpening progress
             nonstellar_sharpened = stitch_chunks_ignore_border(denoised_chunks, luminance.shape, chunk_size=256, overlap=64)
             sharpened_luminance = blend_images(luminance, nonstellar_sharpened, nonstellar_amount)
 
@@ -508,13 +558,15 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
         # Apply stellar sharpening (fixed at strength 1)
         if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
+            print("Stellar Sharpening:")
             for idx, (chunk, i, j, is_edge) in enumerate(chunks):
                 chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
                 with torch.no_grad():
                     sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                 stellar_sharpened_chunks.append((sharpened_chunk, i, j, is_edge))
-                show_progress(idx + 1, total_chunks)  # Update progress after each chunk
+                show_progress(idx + 1, total_chunks)
 
+            print("")  # Add a newline after stellar sharpening progress
             stellar_sharpened_luminance = stitch_chunks_ignore_border(stellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
 
             # Blend based on the mode:
@@ -544,8 +596,6 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
     chunks = split_image_into_chunks_with_overlap(channel, chunk_size=256, overlap=64)
     total_chunks = len(chunks)
 
-    print(f"Sharpening Channel: Total Chunks: {total_chunks}")
-
     denoised_chunks = []
     nonstellar_sharpened = None
     sharpened_channel = channel  # Initialize in case neither path modifies it
@@ -560,6 +610,7 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
 
     # Apply non-stellar sharpening if applicable
     if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
+        print("Non-Stellar Sharpening Channel:")
         for idx, (chunk, i, j, is_edge) in enumerate(chunks):
             chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
 
@@ -579,8 +630,9 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
                     sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
 
             denoised_chunks.append((sharpened_chunk, i, j, is_edge))
-            show_progress(idx + 1, total_chunks)  # Update progress after processing each chunk
+            show_progress(idx + 1, total_chunks)
 
+        print("")  # Add a newline after non-stellar sharpening channel progress
         nonstellar_sharpened = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=256, overlap=64)
         sharpened_channel = blend_images(channel, nonstellar_sharpened, nonstellar_amount)
 
@@ -589,13 +641,15 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
 
     # Apply stellar sharpening (fixed at strength 1)
     if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
+        print("Stellar Sharpening Channel:")
         for idx, (chunk, i, j, is_edge) in enumerate(chunks):
             chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
             with torch.no_grad():
                 sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
             stellar_sharpened_chunks.append((sharpened_chunk, i, j, is_edge))
-            show_progress(idx + 1, total_chunks)  # Update progress after each chunk
+            show_progress(idx + 1, total_chunks)
 
+        print("")  # Add a newline after stellar sharpening channel progress
         stellar_sharpened_channel = stitch_chunks_ignore_border(stellar_sharpened_chunks, channel.shape, chunk_size=256, overlap=64)
 
         # Blend based on the mode:
@@ -607,6 +661,7 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
     return sharpened_channel
 
 
+
 def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_strength=None, stellar_amount=None, nonstellar_amount=None, use_gpu=True, sharpen_channels_separately=False):
     print((r"""
  *#        ___     __      ___       __                              #
@@ -614,7 +669,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.0                       # 
+ *#              Cosmic Clarity - Sharpen V5.2                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
