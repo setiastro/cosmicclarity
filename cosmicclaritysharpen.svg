@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <use xlink:href="#_Image1" x="0" y="0" width="24px" height="24px"/>
+    <circle cx="6.5" cy="7.5" r="3.5" style="fill:white;"/>
+    <circle cx="6" cy="18" r="3" style="fill:white;"/>
+    <circle cx="14" cy="16" r="2" style="fill:white;"/>
+    <circle cx="19.5" cy="6.5" r="1.5" style="fill:white;"/>
+    <circle cx="20.5" cy="21.5" r="1.5" style="fill:white;"/>
+    <circle cx="20.5" cy="12.5" r="1.5" style="fill:white;"/>
+    <use xlink:href="#_Image2" x="14" y="0" width="9px" height="18px"/>
+    <ellipse cx="0.5" cy="0" rx="2.5" ry="3" style="fill:white;"/>
+    <use xlink:href="#_Image3" x="15" y="1" width="3px" height="22px"/>
+    <circle cx="20.5" cy="16.5" r="0.5" style="fill:white;"/>
+    <circle cx="15.5" cy="9.5" r="0.5" style="fill:white;"/>
+    <defs>
+        <image id="_Image1" width="24px" height="24px" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAJ0lEQVRIiWNkYGD4z0BDwERLw0ctGLVg1IJRC0YtGLVg1IJRC6gHAO7LAS/zP8atAAAAAElFTkSuQmCC"/>
+        <image id="_Image2" width="9px" height="18px" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAkAAAASCAYAAACJgPRIAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAHElEQVQokWNgoBT8////P8WGDCMwGh5YAcnBAgAmSQv1aYxcoQAAAABJRU5ErkJggg=="/>
+        <image id="_Image3" width="3px" height="22px" xlink:href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAAWCAYAAAAFMyaXAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAAF0lEQVQYlWNgQAf/////jyE4/AFWbwMAdOIH+fPH8GwAAAAASUVORK5CYII="/>
+    </defs>
+</svg>
