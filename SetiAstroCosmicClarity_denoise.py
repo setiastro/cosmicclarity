@@ -360,57 +360,70 @@ def remove_border(image, border_size=5):
     else:
         return image[border_size:-border_size, border_size:-border_size, :]
 
-# Function to denoise a channel (Y, Cb, Cr)
-# Function to denoise a channel (Y, Cb, Cr)
-def denoise_channel(channel, device, model):
-    # Split channel into chunks
-    chunk_size = 256
-    overlap = 64
-    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
-
-    denoised_chunks = []
-
-    # Apply denoise model to each chunk
-    for idx, (chunk, i, j) in enumerate(chunks):
-        chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().numpy()[0]
-
-        denoised_chunks.append((denoised_chunk, i, j))
-
-        # Show progress update
-        show_progress(idx + 1, len(chunks))
-
-    print("")  # Add a newline after denoising channel progress
-    # Stitch the chunks back together
-    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
-    return denoised_channel
-
-# Main denoise function for an image
+# Function to denoise the image
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
+    original_header = None
+    image = None  # Ensure image is initialized
     try:
         # Load the image based on its extension
         file_extension = os.path.splitext(image_path)[1].lower()
         if file_extension in ['.tif', '.tiff']:
             image = tiff.imread(image_path)
-            if image.dtype == np.uint16:  # If 16-bit, convert to 32-bit float
+            if image.dtype == np.uint16:  # If 16-bit TIFF, convert to 32-bit float
                 image = image.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:  # If 32-bit unsigned, convert to 32-bit float
+            elif image.dtype == np.uint32:  # If 32-bit unsigned TIFF, convert to 32-bit float
                 image = image.astype(np.float32) / 4294967295.0
             else:
                 image = image.astype(np.float32)
         elif file_extension in ['.fits', '.fit']:
             # Load the FITS image
             with fits.open(image_path) as hdul:
-                image_data = hdul[0].data.astype(np.float32)
-                image = image_data / np.max(image_data)  # Normalize to [0, 1]
-                if len(image.shape) == 2:  # Grayscale image
-                    image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
+                image_data = hdul[0].data
+                original_header = hdul[0].header  # Capture the FITS header for saving later
+
+                # Determine the bit depth and process accordingly
+                if image_data.dtype == np.uint16:
+                    print("Detected 16-bit FITS image.")
+                    image = image_data.astype(np.float32) / 65535.0  # Normalize 16-bit FITS
+                elif image_data.dtype == np.float32:
+                    print("Detected 32-bit floating-point FITS image.")
+                    image = image_data  # No normalization needed
+                elif image_data.dtype == np.uint32:
+                    print("Detected 32-bit unsigned FITS image.")
+                    # Apply BSCALE and BZERO if present
+                    bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
+                    bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
+
+                    # Convert to float and apply the scaling and offset
+                    image = image_data.astype(np.float32) * bscale + bzero
+
+                    # Normalize based on the actual data range
+                    image_min = image.min()  # Get the min value after applying BZERO
+                    image_max = image.max()  # Get the max value after applying BZERO
+
+                    # Normalize the image data to the range [0, 1]
+                    image = (image - image_min) / (image_max - image_min)
+                    print(f"Image range after applying BZERO and BSCALE: min={image_min}, max={image_max}")
+
+                # Handle 3D (RGB) vs 2D (grayscale) FITS
+                if image_data.ndim == 3:
+                    if image_data.shape[0] == 3:  # Likely RGB image
+                        print("Detected 3D RGB FITS image.")
+                        # Reorder the axes from (channels, height, width) to (height, width, channels)
+                        image = np.transpose(image_data, (1, 2, 0))
+                    else:
+                        raise ValueError("Unsupported 3D FITS format. Expected 3 channels for RGB.")
+                elif image_data.ndim == 2:
+                    print("Detected 2D grayscale FITS image.")
+                    image = np.stack([image_data] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
                 else:
-                    is_mono = False
+                    raise ValueError("Unsupported FITS format!")
         else:
-            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load as 32-bit float for PNG
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load PNG as 32-bit float
+
+        # Ensure that an image has been loaded
+        if image is None:
+            raise ValueError(f"Failed to load image from: {image_path}")
 
         # Add a border around the image with the median value
         image_with_border = add_border(image, border_size=5)
@@ -424,13 +437,12 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             stretched_image = image_with_border
             original_min = None
 
-        # Check if the image is grayscale (mono) or color
-        if len(image.shape) == 2:  # Grayscale image
+        # Process grayscale or color images
+        if len(image.shape) == 2:
             print("Detected grayscale (mono) image. Denoising single channel directly.")
             denoised_image = denoise_channel(stretched_image, device, model)
             denoised_image = blend_images(stretched_image, denoised_image, denoise_strength)
         else:
-            print("Detected color image.")
             if denoise_mode == 'luminance':
                 print("Denoising Luminance (Y) channel only...")
                 y, cb, cr = extract_luminance(stretched_image)
@@ -440,15 +452,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 denoised_image = merge_luminance(denoised_y, cb, cr)
             else:
                 print("Denoising full RGB channels...")
-                print("Denoising Red Channel:")
                 denoised_r = denoise_channel(stretched_image[:, :, 0], device, model)
-                denoised_r = blend_images(stretched_image[:, :, 0], denoised_r, denoise_strength)
-                print("Denoising Green Channel:")
                 denoised_g = denoise_channel(stretched_image[:, :, 1], device, model)
-                denoised_g = blend_images(stretched_image[:, :, 1], denoised_g, denoise_strength)
-                print("Denoising Blue Channel:")
                 denoised_b = denoise_channel(stretched_image[:, :, 2], device, model)
-                denoised_b = blend_images(stretched_image[:, :, 2], denoised_b, denoise_strength)
                 denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
 
         # Unstretch the image back to its original linear state if it was stretched
@@ -458,11 +464,42 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         # Remove the border added around the image
         denoised_image = remove_border(denoised_image, border_size=5)
         
-        return denoised_image
+        return denoised_image, original_header
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None
+        return None, None
+    
+
+# Function to denoise a channel (Y, Cb, Cr, or individual RGB)
+def denoise_channel(channel, device, model):
+    # Split channel into chunks
+    chunk_size = 256
+    overlap = 64
+    chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
+
+    denoised_chunks = []
+
+    # Apply denoise model to each chunk
+    for idx, (chunk, i, j) in enumerate(chunks):
+        # Prepare the chunk tensor
+        chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)  # Add batch and channel dimensions
+
+        # Run the denoising model
+        with torch.no_grad():
+            denoised_chunk = model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().numpy()[0]  # Denoise and return the first channel
+
+        denoised_chunks.append((denoised_chunk, i, j))
+
+        # Show progress update
+        show_progress(idx + 1, len(chunks))
+
+    print("")  # Add a newline after denoising channel progress
+
+    # Stitch the chunks back together
+    denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
+    return denoised_channel
+
 
 # Main process for denoising images
 def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
@@ -472,7 +509,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.2                       # 
+ *#              Cosmic Clarity - Denoise V5.3                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -494,7 +531,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
         file_extension = os.path.splitext(image_name)[1].lower()
-        denoised_image = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
+        denoised_image, original_header = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
 
         if denoised_image is not None:
             output_image_name = os.path.splitext(image_name)[0] + "_denoised"
@@ -502,16 +539,30 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
             # Save the image based on its extension
             if file_extension in ['.tif', '.tiff']:
                 output_image_path = os.path.join(output_dir, output_image_name + ".tif")
-                tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
+                tiff.imwrite(output_image_path, denoised_image.astype(np.float32))  # Saving as 32-bit float TIFF
                 print(f"Saved 32-bit denoised image to: {output_image_path}")
+            
             elif file_extension in ['.fits', '.fit']:
                 output_image_path = os.path.join(output_dir, output_image_name + ".fits")
-                hdu = fits.PrimaryHDU(denoised_image[:, :, 0])  # Save only the first channel for grayscale
-                hdu.writeto(output_image_path, overwrite=True)
-                print(f"Saved 32-bit denoised image to: {output_image_path}")
+                
+                # Ensure the original header is used only for FITS files
+                if original_header is not None:
+                    # Handling mono or RGB images
+                    if len(denoised_image.shape) == 2:  # Grayscale
+                        hdu = fits.PrimaryHDU(denoised_image, header=original_header)
+                    else:  # RGB Image
+                        # Transpose back to (channels, height, width) for FITS saving
+                        denoised_image_fits = np.transpose(denoised_image, (2, 0, 1))  # (channels, height, width)
+                        hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
+
+                    hdu.writeto(output_image_path, overwrite=True)
+                    print(f"Saved 32-bit denoised image to: {output_image_path}")
+                else:
+                    print(f"Warning: No original header found for {image_name}.")
+            
             else:
                 output_image_path = os.path.join(output_dir, output_image_name + ".png")
-                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)
+                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)  # Convert to 8-bit for PNG
                 denoised_image_pil = Image.fromarray(denoised_image_8bit)
                 denoised_image_pil.save(output_image_path)
                 print(f"Saved 8-bit denoised image to: {output_image_path}")
