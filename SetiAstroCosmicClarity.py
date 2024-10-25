@@ -447,50 +447,109 @@ def unstretch_image(image, original_median, original_min):
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models, sharpen_channels_separately):
     image = None
     file_extension = image_path.lower().split('.')[-1]
-    is_mono = False  # Initialize is_mono as False by default    
+    is_mono = False  # Initialize is_mono as False by default   
+    original_header = None  # Initialize header for FITS files 
+    bit_depth = "32-bit floating point"  # Default bit depth to 32-bit floating point for safety
 
     try:
+        # Load and preprocess the image based on its format
         if file_extension in ['tif', 'tiff']:
-            # Load the TIFF image
-            image = tiff.imread(image_path)
-            if image.dtype == np.uint16:  # If 16-bit, convert to 32-bit float
-                image = image.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:  # If 32-bit unsigned, convert to 32-bit float
-                image = image.astype(np.float32) / 4294967295.0
-            else:
-                image = image.astype(np.float32)
-            if len(image.shape) == 2:  # Grayscale image
-                image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
+            image = tiff.imread(image_path).astype(np.float32)
+            if image.dtype == np.uint16:
+                image /= 65535.0
+                bit_depth = "16-bit"
+            elif image.dtype == np.uint32:
+                image /= 4294967295.0
+                bit_depth = "32-bit unsigned"
+            if len(image.shape) == 2:
+                image = np.stack([image] * 3, axis=-1)
                 is_mono = True
-            else:
-                is_mono = False
         elif file_extension in ['fits', 'fit']:
             # Load the FITS image
             with fits.open(image_path) as hdul:
-                image_data = hdul[0].data.astype(np.float32)
-                image = image_data / np.max(image_data)  # Normalize to [0, 1]
-                if len(image.shape) == 2:  # Grayscale image
-                    image = np.stack([image] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
+                image_data = hdul[0].data
+                original_header = hdul[0].header  # Capture the FITS header
+
+                # Determine the bit depth based on the data type in the FITS file
+                if image_data.dtype == np.uint16:
+                    bit_depth = "16-bit"
+                    print("Identified 16bit FITS iamge.")
+                elif image_data.dtype == np.float32:
+                    bit_depth = "32-bit floating point"
+                    print("Identified 32bit floating point FITS iamge.")
+                elif image_data.dtype == np.uint32:
+                    bit_depth = "32-bit unsigned"
+                    print("Identified 32bit unsigned FITS iamge.")
+                
+                # Handle 3D FITS data (e.g., RGB or multi-layered data)
+                if image_data.ndim == 3 and image_data.shape[0] == 3:
+                    image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
+                    
+                    if bit_depth == "16-bit":
+                        image = image.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
+                    elif bit_depth == "32-bit unsigned":
+                        # Apply BSCALE and BZERO if present
+                        bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
+                        bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
+
+                        # Convert to float and apply the scaling and offset
+                        image = image.astype(np.float32) * bscale + bzero
+
+                        # Normalize based on the actual data range
+                        image_min = image.min()  # Get the min value after applying BZERO
+                        image_max = image.max()  # Get the max value after applying BZERO
+
+                        # Normalize the image data to the range [0, 1]
+                        image = (image - image_min) / (image_max - image_min)
+                        print(f"Image range after applying BZERO and BSCALE (3D case): min={image_min}, max={image_max}")
+
+                    is_mono = False  # RGB data
+
+                # Handle 2D FITS data (grayscale)
+                elif image_data.ndim == 2:
+                    if bit_depth == "16-bit":
+                        image = image_data.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
+                    elif bit_depth == "32-bit unsigned":
+                        # Apply BSCALE and BZERO if present
+                        bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
+                        bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
+
+                        # Convert to float and apply the scaling and offset
+                        image = image_data.astype(np.float32) * bscale + bzero
+
+                        # Normalize based on the actual data range
+                        image_min = image.min()  # Get the min value after applying BZERO
+                        image_max = image.max()  # Get the max value after applying BZERO
+
+                        # Normalize the image data to the range [0, 1]
+                        image = (image - image_min) / (image_max - image_min)
+                        print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
+
+
+
+
+                    elif bit_depth == "32-bit floating point":
+                        image = image_data  # No normalization needed for 32-bit float
                     is_mono = True
+                    image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel for consistency
                 else:
-                    is_mono = False
+                    raise ValueError("Unsupported FITS format!")
         else:
-            # For non-TIFF/FITS files, read and convert to 32-bit float for consistency
             image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
             is_mono = False
+
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None
+        return None, None, None
 
-    # Check if the image needs stretching
+    # Stretch the image if needed
     stretch_needed = np.median(image) < 0.125
     if stretch_needed:
-        # Stretch the image
         stretched_image, original_min, original_median = stretch_image(image)
     else:
         stretched_image = image
 
-    # If sharpening channels separately, split the image into R, G, and B channels
+    # Apply sharpening separately to RGB channels if specified
     if sharpen_channels_separately and len(stretched_image.shape) == 3 and not is_mono:
         r_channel, g_channel, b_channel = stretched_image[:, :, 0], stretched_image[:, :, 1], stretched_image[:, :, 2]
         print("Sharpening Red Channel:")
@@ -513,11 +572,30 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         print(f"Sharpening Image: {os.path.basename(image_path)}")
         print(f"Total Chunks: {total_chunks}")
 
-        denoised_chunks = []
-        nonstellar_sharpened = None
-        sharpened_luminance = luminance  # Initialize in case neither path modifies it
+        # Stellar sharpening and blending with `stellar_amount`
+        stellar_sharpened_chunks = []
+        if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
+            print("Stellar Sharpening:")
+            for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+                chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    stellar_sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                blended_stellar_chunk = blend_images(chunk, stellar_sharpened_chunk, stellar_amount)
+                stellar_sharpened_chunks.append((blended_stellar_chunk, i, j, is_edge))
+                show_progress(idx + 1, total_chunks)
 
-        # Use dictionary to select the non-stellar model based on nonstellar_strength
+            print("")  # Add a newline after stellar sharpening progress
+            stellar_sharpened_luminance = stitch_chunks_ignore_border(stellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
+
+            # If only stellar sharpening is selected, set final luminance and skip non-stellar
+            if sharpening_mode == "Stellar Only":
+                sharpened_luminance = stellar_sharpened_luminance
+            else:
+                # Pass to non-stellar sharpening
+                luminance = stellar_sharpened_luminance
+
+        # Non-stellar sharpening and blending with `nonstellar_amount`
+        nonstellar_sharpened_chunks = []
         model_map = {
             1: models["nonstellar_model_1"],
             2: models["nonstellar_model_2"],
@@ -525,10 +603,9 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
             8: models["nonstellar_model_8"]
         }
 
-        # Apply non-stellar sharpening if applicable
         if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
             print("Non-Stellar Sharpening:")
-            for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+            for idx, (chunk, i, j, is_edge) in enumerate(split_image_into_chunks_with_overlap(luminance, chunk_size=256, overlap=64)):
                 chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
 
                 if nonstellar_strength in [1, 2, 4, 8]:
@@ -536,7 +613,6 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                         active_model = model_map[int(nonstellar_strength)]
                         sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                 else:
-                    # Interpolation for nonstellar_strength between available models
                     if nonstellar_strength <= 4:
                         sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                         sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
@@ -546,59 +622,64 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                         sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                         sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
 
-                denoised_chunks.append((sharpened_chunk, i, j, is_edge))
+                blended_nonstellar_chunk = blend_images(chunk, sharpened_chunk, nonstellar_amount)
+                nonstellar_sharpened_chunks.append((blended_nonstellar_chunk, i, j, is_edge))
                 show_progress(idx + 1, total_chunks)
 
             print("")  # Add a newline after non-stellar sharpening progress
-            nonstellar_sharpened = stitch_chunks_ignore_border(denoised_chunks, luminance.shape, chunk_size=256, overlap=64)
-            sharpened_luminance = blend_images(luminance, nonstellar_sharpened, nonstellar_amount)
+            nonstellar_sharpened_luminance = stitch_chunks_ignore_border(nonstellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
 
-        # Initialize stellar_sharpened_chunks before using it
-        stellar_sharpened_chunks = []
-
-        # Apply stellar sharpening (fixed at strength 1)
-        if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
-            print("Stellar Sharpening:")
-            for idx, (chunk, i, j, is_edge) in enumerate(chunks):
-                chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                stellar_sharpened_chunks.append((sharpened_chunk, i, j, is_edge))
-                show_progress(idx + 1, total_chunks)
-
-            print("")  # Add a newline after stellar sharpening progress
-            stellar_sharpened_luminance = stitch_chunks_ignore_border(stellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
-
-            # Blend based on the mode:
-            if sharpening_mode == "Stellar Only":
-                sharpened_luminance = blend_images(luminance, stellar_sharpened_luminance, stellar_amount)
-            elif sharpening_mode == "Both" and nonstellar_sharpened is not None:
-                sharpened_luminance = blend_images(sharpened_luminance, stellar_sharpened_luminance, stellar_amount)
+            # Set the final sharpened luminance to the non-stellar sharpened and blended result
+            sharpened_luminance = nonstellar_sharpened_luminance
 
         # For color images, merge back the luminance with the original chrominance (Cb, Cr)
         if len(image.shape) == 3:
             sharpened_image = merge_luminance(sharpened_luminance, cb, cr)
         else:
-            # For grayscale images, the luminance is the image itself
             sharpened_image = sharpened_luminance
 
-    # Unstretch the image to return to the original linear state if stretched
+    # Unstretch the image if necessary
     if stretch_needed:
         sharpened_image = unstretch_image(sharpened_image, original_median, original_min)
 
     # Replace the 5-pixel border from the original image
     sharpened_image = replace_border(image, sharpened_image)
 
-    return sharpened_image, is_mono
+    return sharpened_image, is_mono, original_header, bit_depth
+
 
 # Helper function to sharpen individual R, G, B channels
 def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models):
     chunks = split_image_into_chunks_with_overlap(channel, chunk_size=256, overlap=64)
     total_chunks = len(chunks)
 
-    denoised_chunks = []
-    nonstellar_sharpened = None
-    sharpened_channel = channel  # Initialize in case neither path modifies it
+    # Initialize variables to hold sharpened results
+    stellar_sharpened_chunks = []
+    nonstellar_sharpened_chunks = []
+    sharpened_channel = channel  # Initialize as the original channel
+
+    # Apply stellar sharpening first if in "Stellar Only" or "Both" mode
+    if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
+        print("Stellar Sharpening Channel:")
+        for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+            chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+            with torch.no_grad():
+                stellar_sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+            
+            # Apply stellar amount blending immediately after stellar sharpening
+            blended_stellar_chunk = blend_images(chunk, stellar_sharpened_chunk, stellar_amount)
+            stellar_sharpened_chunks.append((blended_stellar_chunk, i, j, is_edge))
+            show_progress(idx + 1, total_chunks)
+
+        print("")  # Add a newline after stellar sharpening progress
+        stellar_sharpened = stitch_chunks_ignore_border(stellar_sharpened_chunks, channel.shape, chunk_size=256, overlap=64)
+
+        # If only stellar sharpening is selected, set final channel output
+        if sharpening_mode == "Stellar Only":
+            sharpened_channel = stellar_sharpened
+        else:
+            # Use stellar-sharpened (and blended) result as input for non-stellar sharpening if "Both" is selected
+            channel = stellar_sharpened
 
     # Use dictionary to select the non-stellar model based on nonstellar_strength
     model_map = {
@@ -611,7 +692,7 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
     # Apply non-stellar sharpening if applicable
     if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
         print("Non-Stellar Sharpening Channel:")
-        for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+        for idx, (chunk, i, j, is_edge) in enumerate(split_image_into_chunks_with_overlap(channel, chunk_size=256, overlap=64)):
             chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
 
             if nonstellar_strength in [1, 2, 4, 8]:
@@ -619,7 +700,7 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
                     active_model = model_map[int(nonstellar_strength)]
                     sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
             else:
-                # Interpolation for nonstellar_strength between available models
+                # Interpolate for nonstellar_strength values between models
                 if nonstellar_strength <= 4:
                     sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                     sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
@@ -629,34 +710,16 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
                     sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                     sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
 
-            denoised_chunks.append((sharpened_chunk, i, j, is_edge))
+            # Blend with the stellar-sharpened (and blended) chunk to apply nonstellar_amount
+            blended_nonstellar_chunk = blend_images(chunk, sharpened_chunk, nonstellar_amount)
+            nonstellar_sharpened_chunks.append((blended_nonstellar_chunk, i, j, is_edge))
             show_progress(idx + 1, total_chunks)
 
         print("")  # Add a newline after non-stellar sharpening channel progress
-        nonstellar_sharpened = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=256, overlap=64)
-        sharpened_channel = blend_images(channel, nonstellar_sharpened, nonstellar_amount)
+        nonstellar_sharpened = stitch_chunks_ignore_border(nonstellar_sharpened_chunks, channel.shape, chunk_size=256, overlap=64)
 
-    # Initialize stellar_sharpened_chunks before using it
-    stellar_sharpened_chunks = []
-
-    # Apply stellar sharpening (fixed at strength 1)
-    if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
-        print("Stellar Sharpening Channel:")
-        for idx, (chunk, i, j, is_edge) in enumerate(chunks):
-            chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
-            with torch.no_grad():
-                sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-            stellar_sharpened_chunks.append((sharpened_chunk, i, j, is_edge))
-            show_progress(idx + 1, total_chunks)
-
-        print("")  # Add a newline after stellar sharpening channel progress
-        stellar_sharpened_channel = stitch_chunks_ignore_border(stellar_sharpened_chunks, channel.shape, chunk_size=256, overlap=64)
-
-        # Blend based on the mode:
-        if sharpening_mode == "Stellar Only":
-            sharpened_channel = blend_images(channel, stellar_sharpened_channel, stellar_amount)
-        elif sharpening_mode == "Both" and nonstellar_sharpened is not None:
-            sharpened_channel = blend_images(sharpened_channel, stellar_sharpened_channel, stellar_amount)
+        # Set the final sharpened channel output to the non-stellar sharpened and blended result
+        sharpened_channel = nonstellar_sharpened
 
     return sharpened_channel
 
@@ -669,7 +732,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.2                       # 
+ *#              Cosmic Clarity - Sharpen V5.3                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -689,31 +752,60 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
         image_path = os.path.join(input_dir, image_name)
         
         # Capture both sharpened_image and is_mono
-        sharpened_image, is_mono = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, models['device'], models, sharpen_channels_separately)
+        sharpened_image, is_mono, original_header, bit_depth = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, models['device'], models, sharpen_channels_separately)
 
         if sharpened_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
+            output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened" + file_extension)
 
-            # Check if the original image was grayscale
+            # Save as FITS file with header information
             if file_extension in ['.fits', '.fit']:
-                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.fits")
+                # Handling mono or RGB images correctly
                 if is_mono:
-                    hdu = fits.PrimaryHDU(sharpened_image[:, :, 0])  # Save only the first channel for grayscale
+                    # For grayscale, save only the first channel with header information
+                    sharpened_image_fits = (sharpened_image[:, :, 0] * 65535).astype(np.uint16) if bit_depth == "16-bit" else sharpened_image[:, :, 0].astype(np.float32)
+                    hdu = fits.PrimaryHDU(sharpened_image_fits, header=original_header)
                 else:
-                    hdu = fits.PrimaryHDU(sharpened_image)  # Save the full image for RGB
+                    # Transpose RGB image back to (channels, height, width) format for FITS saving
+                    sharpened_image_transposed = np.transpose(sharpened_image, (2, 0, 1))  # Transpose back to (channels, height, width)
+
+                    # Apply the transformation logic here, keeping it simple
+                    sharpened_image_transformed = sharpened_image_transposed
+
+                    # Handle the appropriate bit depth conversion and save
+                    if bit_depth == "16-bit":
+                        sharpened_image_fits = (sharpened_image_transformed * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        sharpened_image_fits = sharpened_image_transformed.astype(np.float32)
+                        original_header['BITPIX'] = -32
+
+                    else:
+                        sharpened_image_fits = sharpened_image_transformed.astype(np.float32)
+
+                    # Update the original header to reflect the correct dimensions
+                    original_header['NAXIS'] = 3  # Number of axes
+                    original_header['NAXIS1'] = sharpened_image_transformed.shape[2]  # Width (2200)
+                    original_header['NAXIS2'] = sharpened_image_transformed.shape[1]  # Height (1544)
+                    original_header['NAXIS3'] = sharpened_image_transformed.shape[0]  # Number of channels (3)
+
+                    hdu = fits.PrimaryHDU(sharpened_image_fits, header=original_header)
+
                 hdu.writeto(output_image_path, overwrite=True)
                 print(f"Saved 32-bit sharpened image to: {output_image_path}")
+
+
+
+            # Save as TIFF, handling mono or RGB as 32-bit
             elif file_extension in ['.tif', '.tiff']:
-                output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.tif")
-                
                 if is_mono:
                     # Save only the first channel (grayscale)
                     tiff.imwrite(output_image_path, sharpened_image[:, :, 0].astype(np.float32))
                 else:
                     # Save the sharpened image as 32-bit TIFF (RGB)
                     tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
-                    
+                
                 print(f"Saved 32-bit sharpened image to: {output_image_path}")
+
             else:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.png")
                 
@@ -727,7 +819,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                 
                 sharpened_image_pil.save(output_image_path)
 
-            print(f"Saved sharpened image to: {output_image_path}")
+                print(f"Saved sharpened image to: {output_image_path}")
 
 
 
