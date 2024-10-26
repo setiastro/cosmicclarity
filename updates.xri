@@ -6,7 +6,7 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.26.2024_3.zip" sha1="f72a1e0c54c5e44c313b0e3879c8c1f21b3738f4" type="script" releaseDate="20241026">
+      <package fileName="SetiAstroCosmicClarity10.26.2024_4.zip" sha1="f846c6f67710f46867690f1e6a43bd22bea20e87" type="script" releaseDate="20241026">
          <title>
         CosmicClarity
       </title>
@@ -18,4 +18,4 @@ Fixed a MAC bug where PI would hang waiting for the output file from Cosmic Clar
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-26T21:01:09.359Z" encoding="Base64">QzonJfow58wjef691/l0gQUvsvSLrE38s4luW1EpDSZK76AE31Az3WFjAshJYk/n3wYbyvU8dqVO6D4C15rZCw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-26T21:39:26.757Z" encoding="Base64">uyoX0+J65vTWMsnfxVPKfZ5eamSMpevR7PhV/JWpVEkTW28RJ8q5dwCNzrgW+CaWPCUXacz9H4Uj8wL6zE0IDw==</Signature>
