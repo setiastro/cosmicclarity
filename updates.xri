@@ -2,23 +2,20 @@
 <xri version="1.0">
    <description>
       <p>
-      This is the repository for PixInsight scripts by setiastro.com, Cosmic Clarity and others.
+      This is the repository for PixInsight scripts by setiastro.com.
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.17.2024_2.zip" sha1="d5a637b070f68848a8a2e1c8afb53f9cdb4b0e4e" type="script" releaseDate="20241017">
+      <package fileName="SetiAstroCosmicClarity10.26.2024_2.zip" sha1="4eace01fe2c51d3636130d0a8164c8627490205a" type="script" releaseDate="20241026">
          <title>
-        Cosmic Clarity Denoise and Sharpen
+        CosmicClarity
       </title>
          <description>
             <p>
-Cosmic Clarity version 5 is out now.  This script update allows interface with the newest version.  Includes FITS support, a non-stellar amount ie how much effect the sharpening should have, and the ability to sharpen seperate RGB channels.  Version 5 utilizes a larger more detailed neural architecture and handles a broader range of aberrations, noise patters, and structures.  Be sure to download the latest Cosmic Clarity www.setiastro.com
-		</p>
-            <p>
-Error on mac&apos;s now resolved
+Fixed a bug where PI would hang waiting for the output file from Cosmic Clarity Sharpen.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-17T20:47:24.388Z" encoding="Base64">qX66zFxW+ykXLuBtZ1ghYcpy9Kg/qsS9FxEMIyzYICFIk5Mzb/Hl3U+b3hcISJ7gMv4DoqmAHIDcKNJneSkEBg==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-26T13:44:22.437Z" encoding="Base64">JwaeoQjxj9g/WXEW8NOpmZThwXDqGzcYT+CiM4k+9GGXjEIg8fimio6R2/oDztybArrQIeJS/NGODUJv0DXADQ==</Signature>
