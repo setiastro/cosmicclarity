@@ -303,47 +303,70 @@ def replace_border(original_image, processed_image, border_size=5):
     
     return processed_image
 
+import numpy as np
+
 # Function to stretch an image
 def stretch_image(image):
     """
     Perform a linear stretch on the image.
     """
     original_min = np.min(image)
-    stretched_image = image - original_min
+    stretched_image = image - original_min  # Shift image so that the min is 0
     original_median = np.median(stretched_image, axis=(0, 1)) if image.ndim == 3 else np.median(stretched_image)
-    
+
+
+
     target_median = 0.25
-    if image.ndim == 3:
+    if image.ndim == 3:  # RGB image case
+        # Calculate the overall median for color images as in original code
         median_color = np.mean(np.median(stretched_image, axis=(0, 1)))
         stretched_image = ((median_color - 1) * target_median * stretched_image) / (
             median_color * (target_median + stretched_image - 1) - target_median * stretched_image)
-    else:
+        stretched_medians = np.median(stretched_image, axis=(0, 1))
+    else:  # Grayscale image case
         image_median = np.median(stretched_image)
         stretched_image = ((image_median - 1) * target_median * stretched_image) / (
             image_median * (target_median + stretched_image - 1) - target_median * stretched_image)
-    
-    stretched_image = np.clip(stretched_image, 0, 1)
-    
+        stretched_medians = np.median(stretched_image)
+
+
+
+    stretched_image = np.clip(stretched_image, 0, 1)  # Clip to [0, 1] range
+
     return stretched_image, original_min, original_median
 
-# Function to unstretch an image
+# Function to unstretch an image with final median adjustment
 def unstretch_image(image, original_median, original_min):
     """
     Undo the stretch to return the image to the original linear state.
     """
-    if image.ndim == 3:
+    if image.ndim == 3:  # RGB image case
+        # Use the overall median to revert the stretch for color images
         median_color = np.mean(np.median(image, axis=(0, 1)))
-        unstretched_image = ((median_color - 1) * original_median * image) / \
-                            (median_color * (original_median + image - 1) - original_median * image)
-    else:
-        image_median = np.median(image)
-        unstretched_image = ((image_median - 1) * original_median * image) / \
-                            (image_median * (original_median + image - 1) - original_median * image)
+        unstretched_image = ((median_color - 1) * original_median * image) / (
+            median_color * (original_median + image - 1) - original_median * image)
+        final_medians = np.median(unstretched_image, axis=(0, 1))
 
-    unstretched_image = np.clip(unstretched_image, 0, 1)
-    unstretched_image += original_min
-    unstretched_image = np.clip(unstretched_image, 0, 1)
+        # Adjust each channel to match the original median
+        for c in range(3):  # R, G, B channels
+            unstretched_image[..., c] *= original_median[c] / final_medians[c]
+        adjusted_medians = np.median(unstretched_image, axis=(0, 1))
+    else:  # Grayscale image case
+        image_median = np.median(image)
+        unstretched_image = ((image_median - 1) * original_median * image) / (
+            image_median * (original_median + image - 1) - original_median * image)
+        final_medians = np.median(unstretched_image)
+
+        # Adjust for grayscale case
+        unstretched_image *= original_median / final_medians
+        adjusted_medians = np.median(unstretched_image)
+
+
+    unstretched_image += original_min  # Add back the original minimum
+    unstretched_image = np.clip(unstretched_image, 0, 1)  # Clip to [0, 1] range
+
     return unstretched_image
+
 
 # Function to add a border of median value around the image
 def add_border(image, border_size=5):
@@ -362,6 +385,12 @@ def remove_border(image, border_size=5):
 
 # Function to denoise the image
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
+    # Only proceed if the file extension is an image format we support
+    file_extension = image_path.lower().split('.')[-1]
+    if file_extension not in ['png', 'tif', 'tiff', 'fit', 'fits']:
+        print(f"Ignoring non-image file: {image_path}")
+        return None, None  # Ignore and skip non-image files
+        
     original_header = None
     image = None  # Ensure image is initialized
     try:
@@ -509,7 +538,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.3                       # 
+ *#              Cosmic Clarity - Denoise V5.3.1                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
