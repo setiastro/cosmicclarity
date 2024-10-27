@@ -489,6 +489,13 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
             elif image.dtype == np.uint32:
                 image /= 4294967295.0
                 bit_depth = "32-bit unsigned"
+
+            # Check if the image has an alpha channel and remove it if necessary
+            if image.shape[-1] == 4:
+                print("Detected alpha channel in TIFF. Removing it.")
+                image = image[:, :, :3]  # Keep only the first 3 channels (RGB)
+
+
             if len(image.shape) == 2:
                 image = np.stack([image] * 3, axis=-1)
                 is_mono = True
@@ -760,7 +767,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.3.1                     # 
+ *#              Cosmic Clarity - Sharpen V5.3.2                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
