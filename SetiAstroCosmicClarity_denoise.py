@@ -404,6 +404,12 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 image = image.astype(np.float32) / 4294967295.0
             else:
                 image = image.astype(np.float32)
+
+            # Check if the image has an alpha channel and remove it if necessary
+            if image.shape[-1] == 4:
+                print("Detected alpha channel in TIFF. Removing it.")
+                image = image[:, :, :3]  # Keep only the first 3 channels (RGB)
+                   
         elif file_extension in ['.fits', '.fit']:
             # Load the FITS image
             with fits.open(image_path) as hdul:
@@ -538,7 +544,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.3.1                     # 
+ *#              Cosmic Clarity - Denoise V5.3.2                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
