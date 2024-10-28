@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.26.2024_4.zip" sha1="f846c6f67710f46867690f1e6a43bd22bea20e87" type="script" releaseDate="20241026">
+      <package fileName="SetiAstroCosmicClarity10.28.2024.zip" sha1="3f3d2e1b5657597cd718e248a613b9c80e79d4d5" type="script" releaseDate="20241028">
          <title>
         CosmicClarity
       </title>
          <description>
             <p>
-Fixed a MAC bug where PI would hang waiting for the output file from Cosmic Clarity Sharpen.  This should align with the structure of Denoise as well.
+Fixed a MAC bug when selecting only Stellar or Non-Stellar sharpening.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-26T21:39:26.757Z" encoding="Base64">uyoX0+J65vTWMsnfxVPKfZ5eamSMpevR7PhV/JWpVEkTW28RJ8q5dwCNzrgW+CaWPCUXacz9H4Uj8wL6zE0IDw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-10-28T20:38:44.311Z" encoding="Base64">QLN7BpZx7rHPGQ7Oin4Vl7isKVaqig/lbqNq+gZMDD64AmNi0NKWIvrT3AHW1t/2wAuwU8Hlsh5eqBfNV1s9CA==</Signature>
