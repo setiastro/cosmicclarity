@@ -777,7 +777,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.3.3                     # 
+ *#              Cosmic Clarity - Sharpen V5.4                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -795,76 +795,76 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
 
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
-        
+
         # Capture both sharpened_image and is_mono
         sharpened_image, is_mono, original_header, bit_depth = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, models['device'], models, sharpen_channels_separately)
 
         if sharpened_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
             output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened" + file_extension)
+            actual_bit_depth = bit_depth  # Track actual bit depth for reporting
 
             # Save as FITS file with header information
             if file_extension in ['.fits', '.fit']:
-                # Handling mono or RGB images correctly
                 if is_mono:
-                    # For grayscale, save only the first channel with header information
                     sharpened_image_fits = (sharpened_image[:, :, 0] * 65535).astype(np.uint16) if bit_depth == "16-bit" else sharpened_image[:, :, 0].astype(np.float32)
                     hdu = fits.PrimaryHDU(sharpened_image_fits, header=original_header)
                 else:
-                    # Transpose RGB image back to (channels, height, width) format for FITS saving
-                    sharpened_image_transposed = np.transpose(sharpened_image, (2, 0, 1))  # Transpose back to (channels, height, width)
-
-                    # Apply the transformation logic here, keeping it simple
+                    sharpened_image_transposed = np.transpose(sharpened_image, (2, 0, 1))
                     sharpened_image_transformed = sharpened_image_transposed
 
-                    # Handle the appropriate bit depth conversion and save
                     if bit_depth == "16-bit":
                         sharpened_image_fits = (sharpened_image_transformed * 65535).astype(np.uint16)
                     elif bit_depth == "32-bit unsigned":
                         sharpened_image_fits = sharpened_image_transformed.astype(np.float32)
                         original_header['BITPIX'] = -32
-
+                        actual_bit_depth = "32-bit unsigned"
                     else:
                         sharpened_image_fits = sharpened_image_transformed.astype(np.float32)
+                        actual_bit_depth = "32-bit float"
 
-                    # Update the original header to reflect the correct dimensions
-                    original_header['NAXIS'] = 3  # Number of axes
-                    original_header['NAXIS1'] = sharpened_image_transformed.shape[2]  # Width (2200)
-                    original_header['NAXIS2'] = sharpened_image_transformed.shape[1]  # Height (1544)
-                    original_header['NAXIS3'] = sharpened_image_transformed.shape[0]  # Number of channels (3)
+                    original_header['NAXIS'] = 3
+                    original_header['NAXIS1'] = sharpened_image_transformed.shape[2]
+                    original_header['NAXIS2'] = sharpened_image_transformed.shape[1]
+                    original_header['NAXIS3'] = sharpened_image_transformed.shape[0]
 
                     hdu = fits.PrimaryHDU(sharpened_image_fits, header=original_header)
 
                 hdu.writeto(output_image_path, overwrite=True)
-                print(f"Saved 32-bit sharpened image to: {output_image_path}")
+                print(f"Saved {actual_bit_depth} sharpened image to: {output_image_path}")
 
-
-
-            # Save as TIFF, handling mono or RGB as 32-bit
+            # Save as TIFF, handling mono or RGB with bit depth as specified
             elif file_extension in ['.tif', '.tiff']:
-                if is_mono:
-                    # Save only the first channel (grayscale)
-                    tiff.imwrite(output_image_path, sharpened_image[:, :, 0].astype(np.float32))
+                if bit_depth == "16-bit":
+                    actual_bit_depth = "16-bit"
+                    if is_mono:
+                        tiff.imwrite(output_image_path, (sharpened_image[:, :, 0] * 65535).astype(np.uint16))
+                    else:
+                        tiff.imwrite(output_image_path, (sharpened_image * 65535).astype(np.uint16))
                 else:
-                    # Save the sharpened image as 32-bit TIFF (RGB)
-                    tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
-                
-                print(f"Saved 32-bit sharpened image to: {output_image_path}")
+                    actual_bit_depth = "32-bit float"
+                    if is_mono:
+                        tiff.imwrite(output_image_path, sharpened_image[:, :, 0].astype(np.float32))
+                    else:
+                        tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
+                    
+                print(f"Saved {actual_bit_depth} sharpened image to: {output_image_path}")
 
             else:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.png")
                 
                 if is_mono:
-                    # Save only the first channel (grayscale)
                     sharpened_image_8bit = (sharpened_image[:, :, 0] * 255).astype(np.uint8)
-                    sharpened_image_pil = Image.fromarray(sharpened_image_8bit, mode='L')  # L mode for grayscale
+                    sharpened_image_pil = Image.fromarray(sharpened_image_8bit, mode='L')
                 else:
                     sharpened_image_8bit = (sharpened_image * 255).astype(np.uint8)
                     sharpened_image_pil = Image.fromarray(sharpened_image_8bit)
                 
+                actual_bit_depth = "8-bit"
                 sharpened_image_pil.save(output_image_path)
 
-                print(f"Saved sharpened image to: {output_image_path}")
+                print(f"Saved {actual_bit_depth} sharpened image to: {output_image_path}")
+
 
 
 
