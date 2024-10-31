@@ -648,14 +648,24 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                         active_model = model_map[int(nonstellar_strength)]
                         sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                 else:
-                    if nonstellar_strength <= 4:
+                    if 1 < nonstellar_strength < 2:
+                        # Interpolation between model 1 and model 2
+                        sharpened_chunk_a = model_map[1](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                        sharpened_chunk_b = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(sharpened_chunk_a, sharpened_chunk_b, None, None, nonstellar_strength)
+                    elif 2 <= nonstellar_strength < 4:
+                        # Interpolation between model 2 and model 4
                         sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                         sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                         sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
-                    else:
+                    elif 4 <= nonstellar_strength < 8:
+                        # Interpolation between model 4 and model 8
                         sharpened_chunk_a = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                         sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
                         sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+                    else:
+                        raise ValueError(f"Invalid nonstellar_strength value: {nonstellar_strength}")
+
 
                 blended_nonstellar_chunk = blend_images(chunk, sharpened_chunk, nonstellar_amount)
                 nonstellar_sharpened_chunks.append((blended_nonstellar_chunk, i, j, is_edge))
@@ -767,7 +777,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.3.2                     # 
+ *#              Cosmic Clarity - Sharpen V5.3.3                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
