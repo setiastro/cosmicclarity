@@ -544,7 +544,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.3.2                     # 
+ *#              Cosmic Clarity - Denoise V5.4                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -570,37 +570,50 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
 
         if denoised_image is not None:
             output_image_name = os.path.splitext(image_name)[0] + "_denoised"
+            bit_depth = "32-bit float"  # Default bit depth assumption
 
             # Save the image based on its extension
             if file_extension in ['.tif', '.tiff']:
                 output_image_path = os.path.join(output_dir, output_image_name + ".tif")
-                tiff.imwrite(output_image_path, denoised_image.astype(np.float32))  # Saving as 32-bit float TIFF
-                print(f"Saved 32-bit denoised image to: {output_image_path}")
-            
+
+                # Choose bit depth format for TIFF
+                if denoise_mode == "16-bit":
+                    tiff.imwrite(output_image_path, (denoised_image * 65535).astype(np.uint16))
+                    bit_depth = "16-bit"
+                else:
+                    tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
+
+                print(f"Saved {bit_depth} denoised image to: {output_image_path}")
+
             elif file_extension in ['.fits', '.fit']:
                 output_image_path = os.path.join(output_dir, output_image_name + ".fits")
-                
-                # Ensure the original header is used only for FITS files
+
                 if original_header is not None:
-                    # Handling mono or RGB images
                     if len(denoised_image.shape) == 2:  # Grayscale
-                        hdu = fits.PrimaryHDU(denoised_image, header=original_header)
+                        hdu = fits.PrimaryHDU(denoised_image.astype(np.float32) if bit_depth == "32-bit float" else denoised_image.astype(np.uint16), header=original_header)
                     else:  # RGB Image
-                        # Transpose back to (channels, height, width) for FITS saving
-                        denoised_image_fits = np.transpose(denoised_image, (2, 0, 1))  # (channels, height, width)
+                        denoised_image_fits = np.transpose(denoised_image, (2, 0, 1))
+                        if denoise_mode == "16-bit":
+                            denoised_image_fits = (denoised_image_fits * 65535).astype(np.uint16)
+                            bit_depth = "16-bit"
+                        else:
+                            denoised_image_fits = denoised_image_fits.astype(np.float32)
+
                         hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
 
                     hdu.writeto(output_image_path, overwrite=True)
-                    print(f"Saved 32-bit denoised image to: {output_image_path}")
+                    print(f"Saved {bit_depth} denoised image to: {output_image_path}")
                 else:
                     print(f"Warning: No original header found for {image_name}.")
-            
+
             else:
                 output_image_path = os.path.join(output_dir, output_image_name + ".png")
                 denoised_image_8bit = (denoised_image * 255).astype(np.uint8)  # Convert to 8-bit for PNG
                 denoised_image_pil = Image.fromarray(denoised_image_8bit)
                 denoised_image_pil.save(output_image_path)
-                print(f"Saved 8-bit denoised image to: {output_image_path}")
+                bit_depth = "8-bit"
+                print(f"Saved {bit_depth} denoised image to: {output_image_path}")
+
 
 # Define input and output directories
 input_dir = os.path.join(exe_dir, 'input')
