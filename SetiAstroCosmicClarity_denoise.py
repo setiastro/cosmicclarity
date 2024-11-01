@@ -385,78 +385,65 @@ def remove_border(image, border_size=5):
 
 # Function to denoise the image
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
-    # Only proceed if the file extension is an image format we support
-    file_extension = image_path.lower().split('.')[-1]
-    if file_extension not in ['png', 'tif', 'tiff', 'fit', 'fits']:
+    # Get file extension
+    file_extension = os.path.splitext(image_path)[1].lower()
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits']:
         print(f"Ignoring non-image file: {image_path}")
-        return None, None  # Ignore and skip non-image files
-        
+        return None, None, None, None
+
     original_header = None
-    image = None  # Ensure image is initialized
+    image = None
+    bit_depth = "32-bit float"  # Default bit depth
+
     try:
         # Load the image based on its extension
-        file_extension = os.path.splitext(image_path)[1].lower()
         if file_extension in ['.tif', '.tiff']:
             image = tiff.imread(image_path)
-            if image.dtype == np.uint16:  # If 16-bit TIFF, convert to 32-bit float
+            if image.dtype == np.uint16:
                 image = image.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:  # If 32-bit unsigned TIFF, convert to 32-bit float
+                bit_depth = "16-bit"
+            elif image.dtype == np.uint32:
                 image = image.astype(np.float32) / 4294967295.0
-            else:
-                image = image.astype(np.float32)
+                bit_depth = "32-bit unsigned"
+            elif image.dtype == np.float32:
+                bit_depth = "32-bit float"
+            print(f"Loaded {bit_depth} TIFF image.")
 
-            # Check if the image has an alpha channel and remove it if necessary
-            if image.shape[-1] == 4:
+            # Handle alpha channels and grayscale TIFFs
+            if image.ndim == 3 and image.shape[-1] == 4:
                 print("Detected alpha channel in TIFF. Removing it.")
-                image = image[:, :, :3]  # Keep only the first 3 channels (RGB)
-                   
+                image = image[:, :, :3]
+            if image.ndim == 2:
+                image = np.stack([image] * 3, axis=-1)
+                is_mono = True
+
         elif file_extension in ['.fits', '.fit']:
-            # Load the FITS image
             with fits.open(image_path) as hdul:
                 image_data = hdul[0].data
-                original_header = hdul[0].header  # Capture the FITS header for saving later
-
-                # Determine the bit depth and process accordingly
+                original_header = hdul[0].header
                 if image_data.dtype == np.uint16:
-                    print("Detected 16-bit FITS image.")
-                    image = image_data.astype(np.float32) / 65535.0  # Normalize 16-bit FITS
-                elif image_data.dtype == np.float32:
-                    print("Detected 32-bit floating-point FITS image.")
-                    image = image_data  # No normalization needed
+                    bit_depth = "16-bit"
+                    image = image_data.astype(np.float32) / 65535.0
                 elif image_data.dtype == np.uint32:
-                    print("Detected 32-bit unsigned FITS image.")
-                    # Apply BSCALE and BZERO if present
-                    bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
-                    bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
-
-                    # Convert to float and apply the scaling and offset
-                    image = image_data.astype(np.float32) * bscale + bzero
-
-                    # Normalize based on the actual data range
-                    image_min = image.min()  # Get the min value after applying BZERO
-                    image_max = image.max()  # Get the max value after applying BZERO
-
-                    # Normalize the image data to the range [0, 1]
+                    bit_depth = "32-bit unsigned"
+                    bzero = original_header.get('BZERO', 0)
+                    bscale = original_header.get('BSCALE', 1)
+                    image = (image_data.astype(np.float32) * bscale + bzero)
+                    image_min, image_max = image.min(), image.max()
                     image = (image - image_min) / (image_max - image_min)
-                    print(f"Image range after applying BZERO and BSCALE: min={image_min}, max={image_max}")
-
-                # Handle 3D (RGB) vs 2D (grayscale) FITS
-                if image_data.ndim == 3:
-                    if image_data.shape[0] == 3:  # Likely RGB image
-                        print("Detected 3D RGB FITS image.")
-                        # Reorder the axes from (channels, height, width) to (height, width, channels)
-                        image = np.transpose(image_data, (1, 2, 0))
-                    else:
-                        raise ValueError("Unsupported 3D FITS format. Expected 3 channels for RGB.")
+                elif image_data.dtype == np.float32:
+                    bit_depth = "32-bit float"
+                    image = image_data
+                if image_data.ndim == 3 and image_data.shape[0] == 3:
+                    image = np.transpose(image_data, (1, 2, 0))
                 elif image_data.ndim == 2:
-                    print("Detected 2D grayscale FITS image.")
-                    image = np.stack([image_data] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
-                else:
-                    raise ValueError("Unsupported FITS format!")
-        else:
-            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0  # Load PNG as 32-bit float
+                    image = np.stack([image_data] * 3, axis=-1)
 
-        # Ensure that an image has been loaded
+        else:  # Assume 8-bit PNG
+            image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
+            bit_depth = "8-bit"
+            print(f"Loaded {bit_depth} PNG image.")
+
         if image is None:
             raise ValueError(f"Failed to load image from: {image_path}")
 
@@ -466,45 +453,39 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         # Check if the image needs stretching based on its median value
         original_median = np.median(image_with_border)
         if original_median < 0.125:
-            # Stretch the image
             stretched_image, original_min, original_median = stretch_image(image_with_border)
         else:
             stretched_image = image_with_border
             original_min = None
 
         # Process grayscale or color images
-        if len(image.shape) == 2:
-            print("Detected grayscale (mono) image. Denoising single channel directly.")
+        if image.ndim == 2:
             denoised_image = denoise_channel(stretched_image, device, model)
             denoised_image = blend_images(stretched_image, denoised_image, denoise_strength)
         else:
             if denoise_mode == 'luminance':
-                print("Denoising Luminance (Y) channel only...")
                 y, cb, cr = extract_luminance(stretched_image)
-                print("Denoising Luminance Channel:")
                 denoised_y = denoise_channel(y, device, model)
                 denoised_y = blend_images(y, denoised_y, denoise_strength)
                 denoised_image = merge_luminance(denoised_y, cb, cr)
             else:
-                print("Denoising full RGB channels...")
                 denoised_r = denoise_channel(stretched_image[:, :, 0], device, model)
                 denoised_g = denoise_channel(stretched_image[:, :, 1], device, model)
                 denoised_b = denoise_channel(stretched_image[:, :, 2], device, model)
                 denoised_image = np.stack([denoised_r, denoised_g, denoised_b], axis=-1)
 
-        # Unstretch the image back to its original linear state if it was stretched
+        # Unstretch if stretched previously
         if original_min is not None:
             denoised_image = unstretch_image(denoised_image, original_median, original_min)
 
         # Remove the border added around the image
         denoised_image = remove_border(denoised_image, border_size=5)
-        
-        return denoised_image, original_header
+
+        return denoised_image, original_header, bit_depth, file_extension
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None
-    
+        return None, None, None, None
 
 # Function to denoise a channel (Y, Cb, Cr, or individual RGB)
 def denoise_channel(channel, device, model):
@@ -544,7 +525,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.4                       # 
+ *#              Cosmic Clarity - Denoise V5.4.1                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -565,54 +546,72 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
-        file_extension = os.path.splitext(image_name)[1].lower()
-        denoised_image, original_header = denoise_image(image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode)
+        denoised_image, original_header, bit_depth, file_extension = denoise_image(
+            image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode
+        )
 
         if denoised_image is not None:
             output_image_name = os.path.splitext(image_name)[0] + "_denoised"
-            bit_depth = "32-bit float"  # Default bit depth assumption
+            output_image_path = os.path.join(output_dir, output_image_name + file_extension)
+            actual_bit_depth = bit_depth  # Track actual bit depth for reporting
 
-            # Save the image based on its extension
-            if file_extension in ['.tif', '.tiff']:
-                output_image_path = os.path.join(output_dir, output_image_name + ".tif")
-
-                # Choose bit depth format for TIFF
-                if denoise_mode == "16-bit":
-                    tiff.imwrite(output_image_path, (denoised_image * 65535).astype(np.uint16))
-                    bit_depth = "16-bit"
-                else:
-                    tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
-
-                print(f"Saved {bit_depth} denoised image to: {output_image_path}")
-
-            elif file_extension in ['.fits', '.fit']:
-                output_image_path = os.path.join(output_dir, output_image_name + ".fits")
-
+            # Save as FITS file with header information if the original was FITS
+            if file_extension in ['.fits', '.fit']:
                 if original_header is not None:
-                    if len(denoised_image.shape) == 2:  # Grayscale
-                        hdu = fits.PrimaryHDU(denoised_image.astype(np.float32) if bit_depth == "32-bit float" else denoised_image.astype(np.uint16), header=original_header)
-                    else:  # RGB Image
-                        denoised_image_fits = np.transpose(denoised_image, (2, 0, 1))
-                        if denoise_mode == "16-bit":
-                            denoised_image_fits = (denoised_image_fits * 65535).astype(np.uint16)
-                            bit_depth = "16-bit"
+                    if denoised_image.ndim == 2:  # Grayscale
+                        denoised_image_fits = (denoised_image * 65535).astype(np.uint16) if bit_depth == "16-bit" else denoised_image.astype(np.float32)
+                        hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
+                    else:  # RGB
+                        denoised_image_transposed = np.transpose(denoised_image, (2, 0, 1))
+                        if bit_depth == "16-bit":
+                            denoised_image_fits = (denoised_image_transposed * 65535).astype(np.uint16)
+                        elif bit_depth == "32-bit unsigned":
+                            denoised_image_fits = denoised_image_transposed.astype(np.float32)
+                            original_header['BITPIX'] = -32
                         else:
-                            denoised_image_fits = denoised_image_fits.astype(np.float32)
+                            denoised_image_fits = denoised_image_transposed.astype(np.float32)
 
+                        original_header['NAXIS'] = 3
+                        original_header['NAXIS1'] = denoised_image_transposed.shape[2]
+                        original_header['NAXIS2'] = denoised_image_transposed.shape[1]
+                        original_header['NAXIS3'] = denoised_image_transposed.shape[0]
                         hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
 
                     hdu.writeto(output_image_path, overwrite=True)
-                    print(f"Saved {bit_depth} denoised image to: {output_image_path}")
-                else:
-                    print(f"Warning: No original header found for {image_name}.")
+                    print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
 
+            # Save as TIFF based on the original bit depth if the original was TIFF
+            elif file_extension in ['.tif', '.tiff']:
+                if bit_depth == "16-bit":
+                    actual_bit_depth = "16-bit"
+                    if denoised_image.ndim == 2:  # Grayscale
+                        tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 65535).astype(np.uint16))
+                    else:  # RGB
+                        tiff.imwrite(output_image_path, (denoised_image * 65535).astype(np.uint16))
+                elif bit_depth == "32-bit unsigned":
+                    actual_bit_depth = "32-bit unsigned"
+                    if denoised_image.ndim == 2:  # Grayscale
+                        tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 4294967295).astype(np.uint32))
+                    else:  # RGB
+                        tiff.imwrite(output_image_path, (denoised_image * 4294967295).astype(np.uint32))           
+                else:
+                    actual_bit_depth = "32-bit float"
+                    if denoised_image.ndim == 2:  # Grayscale
+                        tiff.imwrite(output_image_path, denoised_image[:, :, 0].astype(np.float32))
+                    else:  # RGB
+                        tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
+
+                print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
+
+            # Save as 8-bit PNG if the original was PNG
             else:
                 output_image_path = os.path.join(output_dir, output_image_name + ".png")
-                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)  # Convert to 8-bit for PNG
+                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)
                 denoised_image_pil = Image.fromarray(denoised_image_8bit)
+                actual_bit_depth = "8-bit"
                 denoised_image_pil.save(output_image_path)
-                bit_depth = "8-bit"
-                print(f"Saved {bit_depth} denoised image to: {output_image_path}")
+                print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
+
 
 
 # Define input and output directories
