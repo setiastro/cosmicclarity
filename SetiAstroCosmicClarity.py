@@ -401,12 +401,6 @@ def replace_border(original_image, processed_image, border_size=5):
     return processed_image
 
 
-import numpy as np
-
-import numpy as np
-
-import numpy as np
-
 # Function to stretch an image
 def stretch_image(image):
     """
@@ -482,23 +476,35 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
     try:
         # Load and preprocess the image based on its format
         if file_extension in ['tif', 'tiff']:
-            image = tiff.imread(image_path).astype(np.float32)
+            image = tiff.imread(image_path)
+            print(f"Loaded TIFF image with dtype: {image.dtype}")
             if image.dtype == np.uint16:
-                image /= 65535.0
+                image = image.astype(np.float32) / 65535.0
                 bit_depth = "16-bit"
+
             elif image.dtype == np.uint32:
-                image /= 4294967295.0
+                image = image.astype(np.float32) / 4294967295.0
                 bit_depth = "32-bit unsigned"
+            else:
+                image.dtype == np.float32
+                bit_depth = "32-bit floating point"  # If dtype is already float
+
+            print(f"Final bit depth set to: {bit_depth}")    
+
 
             # Check if the image has an alpha channel and remove it if necessary
             if image.shape[-1] == 4:
                 print("Detected alpha channel in TIFF. Removing it.")
                 image = image[:, :, :3]  # Keep only the first 3 channels (RGB)
+                print(f"Loaded image bit depth: {bit_depth}")
+
 
 
             if len(image.shape) == 2:
                 image = np.stack([image] * 3, axis=-1)
                 is_mono = True
+                print(f"Loaded image bit depth: {bit_depth}")
+
         elif file_extension in ['fits', 'fit']:
             # Load the FITS image
             with fits.open(image_path) as hdul:
@@ -777,7 +783,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.4                       # 
+ *#              Cosmic Clarity - Sharpen V5.4.1                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -841,6 +847,12 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                         tiff.imwrite(output_image_path, (sharpened_image[:, :, 0] * 65535).astype(np.uint16))
                     else:
                         tiff.imwrite(output_image_path, (sharpened_image * 65535).astype(np.uint16))
+                elif bit_depth == "32-bit unsigned":
+                    actual_bit_depth = "32-bit unsigned"
+                    if is_mono:
+                        tiff.imwrite(output_image_path, (sharpened_image[:, :, 0] * 4294967295).astype(np.uint32))
+                    else:
+                        tiff.imwrite(output_image_path, (sharpened_image * 4294967295).astype(np.uint32))           
                 else:
                     actual_bit_depth = "32-bit float"
                     if is_mono:
