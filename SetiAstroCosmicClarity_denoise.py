@@ -385,7 +385,6 @@ def remove_border(image, border_size=5):
 
 # Function to denoise the image
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
-    # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
     if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits']:
         print(f"Ignoring non-image file: {image_path}")
@@ -434,10 +433,17 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 elif image_data.dtype == np.float32:
                     bit_depth = "32-bit float"
                     image = image_data
+                else:
+                    # Convert byte order if necessary
+                    if image_data.dtype.byteorder not in ('=', '|'):  # Non-native byte order
+                        image_data = image_data.view(image_data.dtype.newbyteorder('<'))
+                    image = image_data.astype(np.float32)
+
+                # Handle 3D (RGB) data
                 if image_data.ndim == 3 and image_data.shape[0] == 3:
                     image = np.transpose(image_data, (1, 2, 0))
-                elif image_data.ndim == 2:
-                    image = np.stack([image_data] * 3, axis=-1)
+                elif image_data.ndim == 2:  # Grayscale
+                    image = np.stack([image] * 3, axis=-1)
 
         else:  # Assume 8-bit PNG
             image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
@@ -525,7 +531,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.4.1                     # 
+ *#              Cosmic Clarity - Denoise V5.4.2                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
