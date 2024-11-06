@@ -424,6 +424,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 image_data = hdul[0].data
                 original_header = hdul[0].header  # Capture the FITS header
 
+                # Ensure the image data uses the native byte order
+                image_data = image_data.view(image_data.dtype.newbyteorder('='))
+
                 # Determine the bit depth based on the data type in the FITS file
                 if image_data.dtype == np.uint16:
                     bit_depth = "16-bit"
@@ -581,7 +584,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.4.1                     # 
+ *#              Cosmic Clarity - Denoise V5.4.3                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
