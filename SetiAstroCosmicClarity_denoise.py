@@ -425,7 +425,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 original_header = hdul[0].header  # Capture the FITS header
 
                 # Ensure the image data uses the native byte order
-                image_data = image_data.view(image_data.dtype.newbyteorder('='))
+                if image_data.dtype.byteorder not in ('=', '|'):  # Check if byte order is non-native
+                    image_data = image_data.astype(image_data.dtype.newbyteorder('='))  # Convert to native byte order
+
 
                 # Determine the bit depth based on the data type in the FITS file
                 if image_data.dtype == np.uint16:
