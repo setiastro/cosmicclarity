@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity10.28.2024.zip" sha1="3f3d2e1b5657597cd718e248a613b9c80e79d4d5" type="script" releaseDate="20241028">
+      <package fileName="SetiAstroCosmicClarity11.08.2024.zip" sha1="85f6b2b0470412e473d794ff682743119dde20f6" type="script" releaseDate="20241108">
          <title>
-        CosmicClarity
+        Cosmic Clarity Denoise 
       </title>
          <description>
             <p>
-Fixed a MAC bug when selecting only Stellar or Non-Stellar sharpening.
+Updated to be compatible with the latest Cosmic Clarity denoise version
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-10-28T20:38:44.311Z" encoding="Base64">QLN7BpZx7rHPGQ7Oin4Vl7isKVaqig/lbqNq+gZMDD64AmNi0NKWIvrT3AHW1t/2wAuwU8Hlsh5eqBfNV1s9CA==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-11-08T13:08:26.205Z" encoding="Base64">Xa0mNOWr+WYFwq/hzTFYRVK48ljTEfo+Zm+AhMySc68pAUAoMdn2KBBGjNo9tjwq/8Cakkddw2U7ViKJKY5wDQ==</Signature>
