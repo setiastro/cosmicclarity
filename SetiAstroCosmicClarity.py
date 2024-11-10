@@ -1,8 +1,14 @@
 import warnings
+from xisf import XISF
 import os
 import sys
 import torch
 import numpy as np
+import lz4.block
+import zstandard
+import base64
+import ast
+import platform
 import torch.nn as nn
 import tifffile as tiff
 from astropy.io import fits
@@ -163,18 +169,33 @@ def load_models(exe_dir, use_gpu=True):
         "device": device
     }
 
-# Function to extract luminance (Y channel) from an RGB image in 32-bit float precision
+# Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
 def extract_luminance(image):
-    # Ensure the image is a NumPy array before processing
+    # Ensure the image is a NumPy array in 32-bit float format
     if isinstance(image, Image.Image):
-        image = np.array(image).astype(np.float32) / 255.0  # Convert to 32-bit float
+        image = np.array(image).astype(np.float32) / 255.0  # Ensure it's in 32-bit float format
 
-    # Convert RGB image to YCbCr and extract the Y channel (luminance)
-    ycbcr_image = Image.fromarray(np.clip(image * 255, 0, 255).astype(np.uint8)).convert('YCbCr')
-    y, cb, cr = ycbcr_image.split()
+    # Check if the image is grayscale (single channel), and convert it to 3-channel RGB if so
+    if image.shape[-1] == 1:
+        image = np.concatenate([image] * 3, axis=-1)  # Duplicate the single channel to create RGB
 
-    # Convert Y back to 32-bit float
-    return np.array(y).astype(np.float32) / 255.0, cb, cr
+    # Conversion matrix for RGB to YCbCr (ITU-R BT.601 standard)
+    conversion_matrix = np.array([[0.299, 0.587, 0.114],
+                                  [-0.168736, -0.331264, 0.5],
+                                  [0.5, -0.418688, -0.081312]], dtype=np.float32)
+
+    # Apply the RGB to YCbCr conversion matrix
+    ycbcr_image = np.dot(image, conversion_matrix.T)
+
+    # Split the channels: Y is luminance, Cb and Cr are chrominance
+    y_channel = ycbcr_image[:, :, 0]
+    cb_channel = ycbcr_image[:, :, 1] + 0.5  # Offset back to [0, 1] range
+    cr_channel = ycbcr_image[:, :, 2] + 0.5  # Offset back to [0, 1] range
+
+    # Return the Y (luminance) channel in 32-bit float and the Cb, Cr channels for later use
+    return y_channel, cb_channel, cr_channel
+
+
 
 
 # Function to show progress during chunk processing
@@ -182,32 +203,28 @@ def show_progress(current, total):
     progress_percentage = (current / total) * 100
     print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r')
 
-# Function to merge the sharpened luminance (Y) with original chrominance (Cb and Cr) to reconstruct RGB image
-def merge_luminance(y_sharpened, cb, cr):
-    # Ensure Y is clipped between 0 and 1, as we're working in 32-bit float precision
-    y_sharpened = np.clip(y_sharpened, 0.0, 1.0)
+def merge_luminance(y_channel, cb_channel, cr_channel):
+    # Ensure all channels are 32-bit float and in the range [0, 1]
+    y_channel = np.clip(y_channel, 0, 1).astype(np.float32)
+    cb_channel = np.clip(cb_channel, 0, 1).astype(np.float32) - 0.5  # Adjust Cb to [-0.5, 0.5]
+    cr_channel = np.clip(cr_channel, 0, 1).astype(np.float32) - 0.5  # Adjust Cr to [-0.5, 0.5]
 
-    # Convert Cb and Cr from Pillow image objects to numpy arrays (if needed)
-    cb = np.array(cb).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
-    cr = np.array(cr).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
-
-    # Recreate the YCbCr image as a stack of 32-bit float arrays (Y, Cb, Cr)
-    ycbcr_image = np.stack([y_sharpened, cb, cr], axis=-1)
-
-    # Convert YCbCr to RGB while keeping everything in 32-bit float space
-    rgb_image = ycbcr_to_rgb(ycbcr_image)
+    # Convert YCbCr to RGB in 32-bit float format
+    rgb_image = ycbcr_to_rgb(y_channel, cb_channel, cr_channel)
 
     return rgb_image
 
+
+
 # Helper function to convert YCbCr (32-bit float) to RGB
-def ycbcr_to_rgb(ycbcr_image):
+def ycbcr_to_rgb(y_channel, cb_channel, cr_channel):
+    # Combine Y, Cb, Cr channels into one array for matrix multiplication
+    ycbcr_image = np.stack([y_channel, cb_channel, cr_channel], axis=-1)
+
     # Conversion matrix for YCbCr to RGB (ITU-R BT.601 standard)
     conversion_matrix = np.array([[1.0,  0.0, 1.402],
                                   [1.0, -0.344136, -0.714136],
-                                  [1.0,  1.772, 0.0]])
-
-    # Normalize Cb and Cr from [0, 1] to [-0.5, 0.5] as required by YCbCr specification
-    ycbcr_image[:, :, 1:] -= 0.5
+                                  [1.0,  1.772, 0.0]], dtype=np.float32)
 
     # Apply the YCbCr to RGB conversion matrix in 32-bit float
     rgb_image = np.dot(ycbcr_image, conversion_matrix.T)
@@ -216,6 +233,8 @@ def ycbcr_to_rgb(ycbcr_image):
     rgb_image = np.clip(rgb_image, 0.0, 1.0)
 
     return rgb_image
+
+
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -384,8 +403,10 @@ def show_progress(current, total):
 def replace_border(original_image, processed_image, border_size=5):
     # Ensure the dimensions of both images match
     if original_image.shape != processed_image.shape:
-        raise ValueError("Original image and processed image must have the same dimensions.")
-    
+        # Resize processed_image to match the original_image dimensions
+        processed_image = np.resize(processed_image, original_image.shape)
+        print("Warning: Resized processed image to match original image dimensions.")
+
     # Replace the top border
     processed_image[:border_size, :] = original_image[:border_size, :]
     
@@ -440,9 +461,9 @@ def unstretch_image(image, original_median, original_min):
         final_medians = np.median(unstretched_image, axis=(0, 1))
 
         # Adjust each channel to match the original median
-        for c in range(3):  # R, G, B channels
-            unstretched_image[..., c] *= original_median[c] / final_medians[c]
-        adjusted_medians = np.median(unstretched_image, axis=(0, 1))
+        #for c in range(3):  # R, G, B channels
+        #    unstretched_image[..., c] *= original_median[c] / final_medians[c]
+        #adjusted_medians = np.median(unstretched_image, axis=(0, 1))
     else:  # Grayscale image case
         image_median = np.median(image)
         unstretched_image = ((image_median - 1) * original_median * image) / (
@@ -450,8 +471,8 @@ def unstretch_image(image, original_median, original_min):
         final_medians = np.median(unstretched_image)
 
         # Adjust for grayscale case
-        unstretched_image *= original_median / final_medians
-        adjusted_medians = np.median(unstretched_image)
+        #unstretched_image *= original_median / final_medians
+        #adjusted_medians = np.median(unstretched_image)
 
 
     unstretched_image += original_min  # Add back the original minimum
@@ -464,14 +485,16 @@ def unstretch_image(image, original_median, original_min):
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models, sharpen_channels_separately):
     # Only proceed if the file extension is an image format we support
     file_extension = image_path.lower().split('.')[-1]
-    if file_extension not in ['png', 'tif', 'tiff', 'fit', 'fits']:
+    if file_extension not in ['png', 'tif', 'tiff', 'fit', 'fits', 'xisf']:
         print(f"Ignoring non-image file: {image_path}")
-        return None, None, None, None  # Ignore and skip non-image files
+        return None, None, None, None, None, None  # Ignore and skip non-image files
     image = None
     file_extension = image_path.lower().split('.')[-1]
     is_mono = False  # Initialize is_mono as False by default   
     original_header = None  # Initialize header for FITS files 
     bit_depth = "32-bit floating point"  # Default bit depth to 32-bit floating point for safety
+    file_meta, image_meta = None, None
+    
 
     try:
         # Load and preprocess the image based on its format
@@ -498,18 +521,47 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                 image = image[:, :, :3]  # Keep only the first 3 channels (RGB)
                 print(f"Loaded image bit depth: {bit_depth}")
 
-
-
             if len(image.shape) == 2:
                 image = np.stack([image] * 3, axis=-1)
                 is_mono = True
                 print(f"Loaded image bit depth: {bit_depth}")
+
+        elif file_extension == 'xisf':
+            # Load XISF file
+            xisf = XISF(image_path)
+            image = xisf.read_image(0)  # Assuming the image data is in the first image block
+            original_header = xisf.get_images_metadata()[0]  # Load metadata for header reconstruction
+            file_meta = xisf.get_file_metadata()  # For potential use if saving with the same meta
+            image_meta = xisf.get_images_metadata()[0]
+
+            # Determine bit depth
+            if image.dtype == np.uint16:
+                image = image.astype(np.float32) / 65535.0
+                bit_depth = "16-bit"
+            elif image.dtype == np.uint32:
+                image = image.astype(np.float32) / 4294967295.0
+                bit_depth = "32-bit unsigned"
+            elif image.dtype == np.float32:
+                bit_depth = "32-bit floating point"
+
+            # Check if image is mono (2D array) and stack into 3 channels if mono
+            if len(image.shape) == 2 or (len(image.shape) == 3 and image.shape[2] == 1):
+                image = np.stack([image.squeeze()] * 3, axis=-1)  # Convert mono to RGB by duplicating channels
+                is_mono = True
+            else:
+                is_mono = False
+
+            print(f"Loaded XISF image with bit depth: {bit_depth}, Mono: {is_mono}")
 
         elif file_extension in ['fits', 'fit']:
             # Load the FITS image
             with fits.open(image_path) as hdul:
                 image_data = hdul[0].data
                 original_header = hdul[0].header  # Capture the FITS header
+
+                # Ensure the image data uses the native byte order
+                if image_data.dtype.byteorder not in ('=', '|'):  # Check if byte order is non-native
+                    image_data = image_data.astype(image_data.dtype.newbyteorder('='))  # Convert to native byte order
 
                 # Determine the bit depth based on the data type in the FITS file
                 if image_data.dtype == np.uint16:
@@ -581,10 +633,10 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None, None
+        return None, None, None, None, None
 
     # Stretch the image if needed
-    stretch_needed = np.median(image) < 0.125
+    stretch_needed = np.median(image) < 0.08
     if stretch_needed:
         stretched_image, original_min, original_median = stretch_image(image)
     else:
@@ -601,11 +653,13 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         sharpened_b = sharpen_channel(b_channel, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models)
         sharpened_image = np.stack([sharpened_r, sharpened_g, sharpened_b], axis=-1)
     else:
-        # Extract luminance (for color images) or handle grayscale images directly
+        # Extract luminance (for color images) or handle grayscale images directly in 32-bit float
         if len(stretched_image.shape) == 3:
-            luminance, cb, cr = extract_luminance(Image.fromarray((stretched_image * 255).astype(np.uint8)))
+            # Call the updated `extract_luminance` function that maintains 32-bit precision
+            luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
         else:
             luminance = stretched_image
+
 
         chunks = split_image_into_chunks_with_overlap(luminance, chunk_size=256, overlap=64)
         total_chunks = len(chunks)
@@ -685,7 +739,7 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
         # For color images, merge back the luminance with the original chrominance (Cb, Cr)
         if len(image.shape) == 3:
-            sharpened_image = merge_luminance(sharpened_luminance, cb, cr)
+            sharpened_image = merge_luminance(sharpened_luminance, cb_channel, cr_channel)
         else:
             sharpened_image = sharpened_luminance
 
@@ -696,7 +750,7 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
     # Replace the 5-pixel border from the original image
     sharpened_image = replace_border(image, sharpened_image)
 
-    return sharpened_image, is_mono, original_header, bit_depth
+    return sharpened_image, is_mono, original_header, bit_depth, file_meta, image_meta
 
 
 # Helper function to sharpen individual R, G, B channels
@@ -783,7 +837,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.4.1                     # 
+ *#              Cosmic Clarity - Sharpen V5.5                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -803,7 +857,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
         image_path = os.path.join(input_dir, image_name)
 
         # Capture both sharpened_image and is_mono
-        sharpened_image, is_mono, original_header, bit_depth = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, models['device'], models, sharpen_channels_separately)
+        sharpened_image, is_mono, original_header, bit_depth, file_meta, image_meta = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, models['device'], models, sharpen_channels_separately)
 
         if sharpened_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
@@ -861,6 +915,22 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                         tiff.imwrite(output_image_path, sharpened_image.astype(np.float32))
                     
                 print(f"Saved {actual_bit_depth} sharpened image to: {output_image_path}")
+
+            elif file_extension in ['.xisf']:
+                try:
+                    # If mono, replicate the single channel into RGB for consistency
+                    if is_mono:
+                        rgb_image = np.stack([sharpened_image[:, :, 0]] * 3, axis=-1).astype(np.float32)
+                    else:
+                        rgb_image = sharpened_image.astype(np.float32)
+
+                    # Use the XISF write method to save the RGB image or original sharpened image
+                    XISF.write(output_image_path, rgb_image, xisf_metadata=file_meta)
+                    print(f"Saved {bit_depth} XISF sharpened image to: {output_image_path}")
+
+                except Exception as e:
+                    print(f"Error saving XISF file: {e}")
+                            
 
             else:
                 output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened.png")
