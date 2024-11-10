@@ -1,9 +1,15 @@
 import warnings
+from xisf import XISF
 import os
 import sys
 import torch
 import numpy as np
 import torch.nn as nn
+import lz4.block
+import zstandard
+import base64
+import ast
+import platform
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
@@ -137,45 +143,53 @@ def load_model(exe_dir, use_gpu=True):
         "device": device
     }
 
-# Function to extract luminance (Y channel) from an RGB image in 32-bit float precision
+# Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
 def extract_luminance(image):
-    # Ensure the image is a NumPy array before processing
+    # Ensure the image is a NumPy array in 32-bit float format
     if isinstance(image, Image.Image):
-        image = np.array(image).astype(np.float32) / 255.0  # Convert to 32-bit float
+        image = np.array(image).astype(np.float32) / 255.0  # Ensure it's in 32-bit float format
 
-    # Convert RGB image to YCbCr and extract the Y channel (luminance)
-    ycbcr_image = Image.fromarray(np.clip(image * 255, 0, 255).astype(np.uint8)).convert('YCbCr')
-    y, cb, cr = ycbcr_image.split()
+    # Check if the image is grayscale (single channel), and convert it to 3-channel RGB if so
+    if image.shape[-1] == 1:
+        image = np.concatenate([image] * 3, axis=-1)  # Duplicate the single channel to create RGB
 
-    # Convert Y back to 32-bit float
-    return np.array(y).astype(np.float32) / 255.0, cb, cr
+    # Conversion matrix for RGB to YCbCr (ITU-R BT.601 standard)
+    conversion_matrix = np.array([[0.299, 0.587, 0.114],
+                                  [-0.168736, -0.331264, 0.5],
+                                  [0.5, -0.418688, -0.081312]], dtype=np.float32)
 
-# Function to merge the denoised luminance (Y) with original chrominance (Cb and Cr) to reconstruct RGB image
-def merge_luminance(y_denoised, cb, cr):
-    # Ensure Y is clipped between 0 and 1, as we're working in 32-bit float precision
-    y_denoised = np.clip(y_denoised, 0.0, 1.0)
+    # Apply the RGB to YCbCr conversion matrix
+    ycbcr_image = np.dot(image, conversion_matrix.T)
 
-    # Convert Cb and Cr from Pillow image objects to numpy arrays (if needed)
-    cb = np.array(cb).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
-    cr = np.array(cr).astype(np.float32) / 255.0  # Convert to 32-bit float in range [0, 1]
+    # Split the channels: Y is luminance, Cb and Cr are chrominance
+    y_channel = ycbcr_image[:, :, 0]
+    cb_channel = ycbcr_image[:, :, 1] + 0.5  # Offset back to [0, 1] range
+    cr_channel = ycbcr_image[:, :, 2] + 0.5  # Offset back to [0, 1] range
 
-    # Recreate the YCbCr image as a stack of 32-bit float arrays (Y, Cb, Cr)
-    ycbcr_image = np.stack([y_denoised, cb, cr], axis=-1)
+    # Return the Y (luminance) channel in 32-bit float and the Cb, Cr channels for later use
+    return y_channel, cb_channel, cr_channel
 
-    # Convert YCbCr to RGB while keeping everything in 32-bit float space
-    rgb_image = ycbcr_to_rgb(ycbcr_image)
+def merge_luminance(y_channel, cb_channel, cr_channel):
+    # Ensure all channels are 32-bit float and in the range [0, 1]
+    y_channel = np.clip(y_channel, 0, 1).astype(np.float32)
+    cb_channel = np.clip(cb_channel, 0, 1).astype(np.float32) - 0.5  # Adjust Cb to [-0.5, 0.5]
+    cr_channel = np.clip(cr_channel, 0, 1).astype(np.float32) - 0.5  # Adjust Cr to [-0.5, 0.5]
+
+    # Convert YCbCr to RGB in 32-bit float format
+    rgb_image = ycbcr_to_rgb(y_channel, cb_channel, cr_channel)
 
     return rgb_image
 
+
 # Helper function to convert YCbCr (32-bit float) to RGB
-def ycbcr_to_rgb(ycbcr_image):
+def ycbcr_to_rgb(y_channel, cb_channel, cr_channel):
+    # Combine Y, Cb, Cr channels into one array for matrix multiplication
+    ycbcr_image = np.stack([y_channel, cb_channel, cr_channel], axis=-1)
+
     # Conversion matrix for YCbCr to RGB (ITU-R BT.601 standard)
     conversion_matrix = np.array([[1.0,  0.0, 1.402],
                                   [1.0, -0.344136, -0.714136],
-                                  [1.0,  1.772, 0.0]])
-
-    # Normalize Cb and Cr from [0, 1] to [-0.5, 0.5] as required by YCbCr specification
-    ycbcr_image[:, :, 1:] -= 0.5
+                                  [1.0,  1.772, 0.0]], dtype=np.float32)
 
     # Apply the YCbCr to RGB conversion matrix in 32-bit float
     rgb_image = np.dot(ycbcr_image, conversion_matrix.T)
@@ -184,6 +198,7 @@ def ycbcr_to_rgb(ycbcr_image):
     rgb_image = np.clip(rgb_image, 0.0, 1.0)
 
     return rgb_image
+
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -348,9 +363,9 @@ def unstretch_image(image, original_median, original_min):
         final_medians = np.median(unstretched_image, axis=(0, 1))
 
         # Adjust each channel to match the original median
-        for c in range(3):  # R, G, B channels
-            unstretched_image[..., c] *= original_median[c] / final_medians[c]
-        adjusted_medians = np.median(unstretched_image, axis=(0, 1))
+        #for c in range(3):  # R, G, B channels
+        #    unstretched_image[..., c] *= original_median[c] / final_medians[c]
+        #adjusted_medians = np.median(unstretched_image, axis=(0, 1))
     else:  # Grayscale image case
         image_median = np.median(image)
         unstretched_image = ((image_median - 1) * original_median * image) / (
@@ -358,8 +373,8 @@ def unstretch_image(image, original_median, original_min):
         final_medians = np.median(unstretched_image)
 
         # Adjust for grayscale case
-        unstretched_image *= original_median / final_medians
-        adjusted_medians = np.median(unstretched_image)
+        #unstretched_image *= original_median / final_medians
+        #adjusted_medians = np.median(unstretched_image)
 
 
     unstretched_image += original_min  # Add back the original minimum
@@ -387,14 +402,15 @@ def remove_border(image, border_size=5):
 def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
-    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits']:
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
         print(f"Ignoring non-image file: {image_path}")
-        return None, None, None, None
+        return None, None, None, None, None, None
 
     original_header = None
     image = None
     bit_depth = "32-bit float"  # Default bit depth
     is_mono = False
+    file_meta, image_meta = None, None
 
     try:
         # Load the image based on its extension
@@ -494,6 +510,34 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 else:
                     raise ValueError("Unsupported FITS format!")
 
+        # Check if file extension is '.xisf'
+        elif file_extension == '.xisf':
+            # Load XISF file
+            xisf = XISF(image_path)
+            image = xisf.read_image(0)  # Assuming the image data is in the first image block
+            original_header = xisf.get_images_metadata()[0]  # Load metadata for header reconstruction
+            file_meta = xisf.get_file_metadata()  # For potential use if saving with the same meta
+            image_meta = xisf.get_images_metadata()[0]
+
+            # Determine bit depth
+            if image.dtype == np.uint16:
+                image = image.astype(np.float32) / 65535.0
+                bit_depth = "16-bit"
+            elif image.dtype == np.uint32:
+                image = image.astype(np.float32) / 4294967295.0
+                bit_depth = "32-bit unsigned"
+            elif image.dtype == np.float32:
+                bit_depth = "32-bit floating point"
+
+            # Check if image is mono (2D array) and stack into 3 channels if mono
+            if len(image.shape) == 2 or (len(image.shape) == 3 and image.shape[2] == 1):
+                image = np.stack([image.squeeze()] * 3, axis=-1)  # Convert mono to RGB by duplicating channels
+                is_mono = True
+            else:
+                is_mono = False
+
+            print(f"Loaded XISF image with bit depth: {bit_depth}, Mono: {is_mono}")
+
 
         else:  # Assume 8-bit PNG
             image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
@@ -521,15 +565,27 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             denoised_image = denoised_image[:, :, np.newaxis]  # Convert back to single channel
 
         else:  # Color image
-            denoised_r = denoise_channel(stretched_image[:, :, 0], device, model, is_mono=True)
-            denoised_g = denoise_channel(stretched_image[:, :, 1], device, model, is_mono=True)
-            denoised_b = denoise_channel(stretched_image[:, :, 2], device, model, is_mono=True)
+            if denoise_mode == 'luminance':
+                # Extract luminance and chrominance channels
+                luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
 
-            denoised_image = np.stack([
-                blend_images(stretched_image[:, :, 0], denoised_r, denoise_strength),
-                blend_images(stretched_image[:, :, 1], denoised_g, denoise_strength),
-                blend_images(stretched_image[:, :, 2], denoised_b, denoise_strength)
-            ], axis=-1)
+                # Denoise only the luminance channel
+                denoised_luminance = denoise_channel(luminance, device, model, is_mono=True)
+                denoised_luminance = blend_images(luminance, denoised_luminance, denoise_strength)
+
+                # Merge denoised luminance back with chrominance channels
+                denoised_image = merge_luminance(denoised_luminance, cb_channel, cr_channel)
+
+            else:  # Full RGB denoising mode
+                denoised_r = denoise_channel(stretched_image[:, :, 0], device, model, is_mono=True)
+                denoised_g = denoise_channel(stretched_image[:, :, 1], device, model, is_mono=True)
+                denoised_b = denoise_channel(stretched_image[:, :, 2], device, model, is_mono=True)
+
+                denoised_image = np.stack([
+                    blend_images(stretched_image[:, :, 0], denoised_r, denoise_strength),
+                    blend_images(stretched_image[:, :, 1], denoised_g, denoise_strength),
+                    blend_images(stretched_image[:, :, 2], denoised_b, denoise_strength)
+                ], axis=-1)
 
         # Unstretch if stretched previously
         if original_min is not None:
@@ -538,11 +594,11 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         # Remove the border added around the image
         denoised_image = remove_border(denoised_image, border_size=5)
 
-        return denoised_image, original_header, bit_depth, file_extension, is_mono
+        return denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     
 # Function to denoise a single channel
 def denoise_channel(channel, device, model, is_mono=False):
@@ -581,7 +637,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.4.4                     # 
+ *#              Cosmic Clarity - Denoise V5.5                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -602,7 +658,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
-        denoised_image, original_header, bit_depth, file_extension, is_mono = denoise_image(
+        denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta = denoise_image(
             image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode
         )
 
@@ -684,6 +740,24 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
                         tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
 
                 print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
+
+            elif file_extension == '.xisf':
+                try:
+                    # If the image is mono, we replicate the single channel into RGB format for consistency
+                    if is_mono:
+                        rgb_image = np.stack([denoised_image[:, :, 0]] * 3, axis=-1).astype(np.float32)
+                    else:
+                        rgb_image = denoised_image.astype(np.float32)
+                    
+                    # Save the denoised image in XISF format using the XISF write method, including metadata if available
+                    XISF.write(output_image_path, rgb_image, xisf_metadata=file_meta)  # Replace `original_header` with the appropriate metadata if it's named differently
+
+                    print(f"Saved {bit_depth} XISF denoised image to: {output_image_path}")
+                    
+                except Exception as e:
+                    print(f"Error saving XISF file: {e}")
+
+
 
             # Save as 8-bit PNG if the original was PNG
             else:
