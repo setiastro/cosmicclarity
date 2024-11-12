@@ -223,7 +223,7 @@ def generate_blend_weights(chunk_size, overlap):
     return blend_matrix
 
 # Function to stitch overlapping chunks back together with soft blending while ignoring borders for all chunks
-def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=5):
+def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=16):
     stitched_image = np.zeros(image_shape, dtype=np.float32)
     weight_map = np.zeros(image_shape, dtype=np.float32)  # Track blending weights
     
@@ -299,7 +299,7 @@ def show_progress(current, total):
     print(f"Progress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='\r', flush=True)
 
 # Function to replace the 5-pixel border from the original image into the processed image
-def replace_border(original_image, processed_image, border_size=5):
+def replace_border(original_image, processed_image, border_size=16):
     # Ensure the dimensions of both images match
     if original_image.shape != processed_image.shape:
         raise ValueError("Original image and processed image must have the same dimensions.")
@@ -548,11 +548,11 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             raise ValueError(f"Failed to load image from: {image_path}")
 
         # Add a border around the image with the median value
-        image_with_border = add_border(image, border_size=5)
+        image_with_border = add_border(image, border_size=16)
 
         # Check if the image needs stretching based on its median value
         original_median = np.median(image_with_border)
-        if original_median < 0.08:
+        if original_median < 0.12:
             stretched_image, original_min, original_median = stretch_image(image_with_border)
         else:
             stretched_image = image_with_border
@@ -592,7 +592,7 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             denoised_image = unstretch_image(denoised_image, original_median, original_min)
 
         # Remove the border added around the image
-        denoised_image = remove_border(denoised_image, border_size=5)
+        denoised_image = remove_border(denoised_image, border_size=16)
 
         return denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta
 
@@ -637,7 +637,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.5                       # 
+ *#              Cosmic Clarity - Denoise V5.5.1                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
