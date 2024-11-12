@@ -260,7 +260,7 @@ def generate_blend_weights(chunk_size, overlap):
     return blend_matrix
 
 # Function to stitch overlapping chunks back together with soft blending while ignoring borders for all chunks
-def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=5):
+def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=16):
     stitched_image = np.zeros(image_shape, dtype=np.float32)
     weight_map = np.zeros(image_shape, dtype=np.float32)  # Track blending weights
     
@@ -400,7 +400,7 @@ def show_progress(current, total):
     print(f"\rProgress: {progress_percentage:.2f}% ({current}/{total} chunks processed)", end='', flush=True)
 
 # Function to replace the 5-pixel border from the original image into the processed image
-def replace_border(original_image, processed_image, border_size=5):
+def replace_border(original_image, processed_image, border_size=16):
     # Ensure the dimensions of both images match
     if original_image.shape != processed_image.shape:
         # Resize processed_image to match the original_image dimensions
@@ -480,6 +480,20 @@ def unstretch_image(image, original_median, original_min):
 
     return unstretched_image
 
+# Function to add a border of median value around the image
+def add_border(image, border_size=16):
+    median_value = np.median(image)
+    if len(image.shape) == 2:
+        return np.pad(image, ((border_size, border_size), (border_size, border_size)), 'constant', constant_values=median_value)
+    else:
+        return np.pad(image, ((border_size, border_size), (border_size, border_size), (0, 0)), 'constant', constant_values=median_value)
+
+# Function to remove the border added around the image
+def remove_border(image, border_size=16):
+    if len(image.shape) == 2:
+        return image[border_size:-border_size, border_size:-border_size]
+    else:
+        return image[border_size:-border_size, border_size:-border_size, :]
 
 # Function to sharpen image
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models, sharpen_channels_separately):
@@ -635,12 +649,19 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         print(f"Error reading image {image_path}: {e}")
         return None, None, None, None, None
 
+
+    # Add a border around the image with the median value
+    image_with_border = add_border(image, border_size=16)
+
+
     # Stretch the image if needed
-    stretch_needed = np.median(image) < 0.08
+    stretch_needed = np.median(image_with_border) < 0.12
     if stretch_needed:
-        stretched_image, original_min, original_median = stretch_image(image)
+        stretched_image, original_min, original_median = stretch_image(image_with_border)
     else:
-        stretched_image = image
+        stretched_image = image_with_border
+
+        
 
     # Apply sharpening separately to RGB channels if specified
     if sharpen_channels_separately and len(stretched_image.shape) == 3 and not is_mono:
@@ -748,7 +769,7 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         sharpened_image = unstretch_image(sharpened_image, original_median, original_min)
 
     # Replace the 5-pixel border from the original image
-    sharpened_image = replace_border(image, sharpened_image)
+    sharpened_image = remove_border(sharpened_image, border_size=16)
 
     return sharpened_image, is_mono, original_header, bit_depth, file_meta, image_meta
 
@@ -837,7 +858,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.5                       # 
+ *#              Cosmic Clarity - Sharpen V5.5.1                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
