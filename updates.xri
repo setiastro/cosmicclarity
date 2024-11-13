@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity11.08.2024.zip" sha1="85f6b2b0470412e473d794ff682743119dde20f6" type="script" releaseDate="20241108">
+      <package fileName="SetiAstroCosmicClarity11.13.2024.zip" sha1="d114a6951e2e95e3b5a16b456961b8e9d9df20be" type="script" releaseDate="20241113">
          <title>
-        Cosmic Clarity Denoise 
+        Cosmic Clarity Sharpen and Denoise
       </title>
          <description>
             <p>
-Updated to be compatible with the latest Cosmic Clarity denoise version
+Cosmic Clarity supports native xisf format now.  This removes the restriction on using it on very large files as well.  Please upgrade to the latest version of Cosmic Clarity V5.5: https://www.setiastro.com/cosmic-clarity
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-11-08T13:08:26.205Z" encoding="Base64">Xa0mNOWr+WYFwq/hzTFYRVK48ljTEfo+Zm+AhMySc68pAUAoMdn2KBBGjNo9tjwq/8Cakkddw2U7ViKJKY5wDQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-11-13T16:49:47.942Z" encoding="Base64">GLBJg+68FAxVkgmM81ABeSc/IJyNT02MYZAR3HBkW9Y++QhBX3EgXmPa7S17m/M4bap9UrYCDDIixcj/zFLKBA==</Signature>
