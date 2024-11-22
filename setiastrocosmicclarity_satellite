@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QFileDialog, QLineEdit, QTextEdit, QStyle, QProgressBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-
+from PyQt5.QtGui import QIcon
 
 # Standard Library Imports
 import os
@@ -59,39 +59,53 @@ class SharpeningCNN(nn.Module):
         
         # Encoder (down-sampling path)
         self.encoder1 = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
+            nn.Conv2d(3, 8, kernel_size=3, padding=1),  # 1st layer (3 -> 8 feature maps)
+            nn.ReLU(),
+            nn.Conv2d(8, 16, kernel_size=3, padding=1),  # 2nd layer (8 -> 16 feature maps)
             nn.ReLU(),
             nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer (16 -> 16)
             nn.ReLU()
         )
         self.encoder2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
+            nn.Conv2d(16, 32, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (16 -> 32)
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer (32 -> 32)
+            nn.Conv2d(32, 32, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (32 -> 32)
             nn.ReLU()
         )
         self.encoder3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
+            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (32 -> 64)
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional layer (64 -> 64) with dilation
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (64 -> 64)
+            nn.ReLU()
+        )
+        self.encoder4 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (64 -> 128)
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (128 -> 128)
             nn.ReLU()
         )
         
         # Decoder (up-sampling path with skip connections)
+        self.decoder4 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # Combine with encoder3 output
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
+            nn.ReLU()
+        )
         self.decoder3 = nn.Sequential(
-            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
+            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # Combine with encoder2 output
             nn.ReLU(),
             nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
             nn.ReLU()
         )
         self.decoder2 = nn.Sequential(
-            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
+            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # Combine with encoder1 output
             nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer
+            nn.Conv2d(16, 8, kernel_size=3, padding=1),  # Additional layer (16 -> 8 feature maps)
             nn.ReLU()
         )
         self.decoder1 = nn.Sequential(
-            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
+            nn.Conv2d(8, 3, kernel_size=3, padding=1),  # Output layer (8 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
@@ -100,10 +114,12 @@ class SharpeningCNN(nn.Module):
         e1 = self.encoder1(x)  # First encoding block
         e2 = self.encoder2(e1)  # Second encoding block
         e3 = self.encoder3(e2)  # Third encoding block
-        
+        e4 = self.encoder4(e3)  # Fourth encoding block (128 feature maps with dilation)
+
         # Decoder with skip connections
-        d3 = self.decoder3(torch.cat([e3, e2], dim=1))  # Concatenate with encoder2 output
-        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
+        d4 = self.decoder4(torch.cat([e4, e3], dim=1))  # Combine with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Combine with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Combine with encoder1 output
         d1 = self.decoder1(d2)  # Final output layer
 
         return d1
@@ -127,7 +143,7 @@ def load_models(exe_dir, use_gpu=True):
     detection_model.eval().to(device)
 
     removal_model = SharpeningCNN()
-    removal_model.load_state_dict(torch.load(os.path.join(exe_dir, "satelliteremoval.pth"), map_location=device, weights_only=True))
+    removal_model.load_state_dict(torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"), map_location=device, weights_only=True))
     removal_model.eval().to(device)
 
     cached_models = {
@@ -340,8 +356,18 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.0")
+
         self.setGeometry(100, 100, 400, 300)
+
+        if hasattr(sys, '_MEIPASS'):
+            # PyInstaller path
+            icon_path = os.path.join(sys._MEIPASS, 'satellite.png')
+        else:
+            # Development path
+            icon_path = 'satellite.png'
+
+        self.setWindowIcon(QIcon(icon_path))
 
         # Variables to store user input
         self.use_gpu = True
@@ -351,6 +377,8 @@ class SatelliteToolDialog(QDialog):
         self.models = None
         self.live_monitor_thread = None       
         self.log_signal.connect(self.log_message)
+
+                
  
 
         # Main layout
@@ -430,6 +458,15 @@ class SatelliteToolDialog(QDialog):
         # Add the horizontal layout to the main layout
         layout.addWidget(self.process_button)
         layout.addLayout(monitor_layout)
+
+        footer_label = QLabel("""
+            Written by Franklin Marek<br>
+            <a href='http://www.setiastro.com'>www.setiastro.com</a>
+        """)
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(footer_label)
 
         self.setLayout(layout)
 
@@ -1154,18 +1191,49 @@ class BatchProcessor(QThread):
 
 
 if __name__ == "__main__":
-    try:
-        # Get user inputs through the PyQt GUI
-        input_dir, output_dir, use_gpu, satellite_mode = get_user_input()
+    parser = argparse.ArgumentParser(description="Cosmic Clarity Satellite Removal Tool")
+    parser.add_argument("--input", type=str, help="Path to the input directory containing images.")
+    parser.add_argument("--output", type=str, help="Path to the output directory to save processed images.")
+    parser.add_argument("--use-gpu", action="store_true", help="Enable GPU acceleration if available.")
+    parser.add_argument("--mode", type=str, choices=["full", "luminance"], default="full", help="Satellite removal mode: 'full' or 'luminance'.")
+    parser.add_argument("--batch", action="store_true", help="Enable batch processing mode for the input directory.")
+    parser.add_argument("--monitor", action="store_true", help="Enable live folder monitoring for new files.")
 
-        print(f"Input Directory: {input_dir}")
-        print(f"Output Directory: {output_dir}")
-        print(f"Use GPU: {use_gpu}")
+    args = parser.parse_args()
 
-        print(f"Satellite Mode: {satellite_mode}")
+    # If arguments are provided, run in headless mode
+    if args.input and args.output:
+        try:
+            input_dir = args.input
+            output_dir = args.output
+            use_gpu = args.use_gpu
+            satellite_mode = args.mode
 
-        # Call the process_images function with the user-specified settings
-        process_images(input_dir, output_dir, use_gpu, satellite_mode)
+            print(f"Input Directory: {input_dir}")
+            print(f"Output Directory: {output_dir}")
+            print(f"Use GPU: {use_gpu}")
+            print(f"Satellite Mode: {satellite_mode}")
 
-    except Exception as e:
-        print(f"Error: {e}")
+            # Load models
+            models = load_models(exe_dir, use_gpu)
+
+            if args.batch:
+                print("Starting batch processing...")
+                batch_processor = BatchProcessor(input_dir, output_dir, models, satellite_mode)
+                batch_processor.log_signal.connect(lambda msg: print(f"[LOG]: {msg}"))
+                batch_processor.run()
+                print("Batch processing complete.")
+            elif args.monitor:
+                print("Starting live folder monitoring...")
+                folder_monitor = FolderMonitor(input_dir, output_dir, models, satellite_mode)
+                folder_monitor.log_signal.connect(lambda msg: print(f"[LOG]: {msg}"))
+                folder_monitor.run()
+            else:
+                print("Error: Please specify --batch or --monitor.")
+        except Exception as e:
+            print(f"Error during headless execution: {e}")
+    else:
+        # If no arguments are provided, launch the GUI
+        app = QApplication([])
+        dialog = SatelliteToolDialog()
+        dialog.exec_()
