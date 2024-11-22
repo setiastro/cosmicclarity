@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity11.13.2024.zip" sha1="d114a6951e2e95e3b5a16b456961b8e9d9df20be" type="script" releaseDate="20241113">
+      <package fileName="SetiAstroCosmicClarity11.22.2024.zip" sha1="0a5c954fe6ec10541ca10897ad2348191b55c2be" type="script" releaseDate="20241122">
          <title>
-        Cosmic Clarity Sharpen and Denoise
+        Cosmic Clarity
       </title>
          <description>
             <p>
-Cosmic Clarity supports native xisf format now.  This removes the restriction on using it on very large files as well.  Please upgrade to the latest version of Cosmic Clarity V5.5: https://www.setiastro.com/cosmic-clarity
+Delay added after the output file is found prior to trying to import it back into PI.  This should eliminate some users were facing where their computer was trying to retrieve the file prior to it fully saving after Cosmic Clarity was completed.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-11-13T16:49:47.942Z" encoding="Base64">GLBJg+68FAxVkgmM81ABeSc/IJyNT02MYZAR3HBkW9Y++QhBX3EgXmPa7S17m/M4bap9UrYCDDIixcj/zFLKBA==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-11-22T18:36:13.684Z" encoding="Base64">1l+A7stxVIZv9ogp3cyWjaGx1r2Mjc5r1N0jOkRyn2ibK7l2r3FNLdIyBS2sSauFUbB1Whe/Wm4g/71OCgNUAg==</Signature>
