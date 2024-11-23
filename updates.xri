@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity11.22.2024.zip" sha1="0a5c954fe6ec10541ca10897ad2348191b55c2be" type="script" releaseDate="20241122">
+      <package fileName="SetiAstroCosmicClarity11.23.2024.zip" sha1="e69273994c014130a4a50e4c5ce0e5798c3f6d45" type="script" releaseDate="20241123">
          <title>
-        Cosmic Clarity
+        Cosmic Clarity - Satellite Removal Tool V1.0
       </title>
          <description>
             <p>
-Delay added after the output file is found prior to trying to import it back into PI.  This should eliminate some users were facing where their computer was trying to retrieve the file prior to it fully saving after Cosmic Clarity was completed.
+Script for PI to interface with Seti Astro Comsic Clarity Satellite Removal Tool.  From PI you can have it process the current image, or trigger a batch process.  If you choose to run it on the single image, it will save a temp of the image in the background, run the Satellite Removal Tool, and then import the image back into PI while deleting the temp images.  You will also have to have Cosmic Clarity already installed.  Please visit www.setiastro.com/cosmicclarity for more information.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-11-22T18:36:13.684Z" encoding="Base64">1l+A7stxVIZv9ogp3cyWjaGx1r2Mjc5r1N0jOkRyn2ibK7l2r3FNLdIyBS2sSauFUbB1Whe/Wm4g/71OCgNUAg==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-11-23T19:10:04.004Z" encoding="Base64">0On457nV7cB1TyHlxysCEG4/nTg1a9d/HqsFQs5jFGtbhAl0GhdNG4QlDi513QzOzIX6Zj20j/PDdSpbPJm8Cw==</Signature>
