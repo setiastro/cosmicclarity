@@ -6,7 +6,7 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity11.23.2024.zip" sha1="e69273994c014130a4a50e4c5ce0e5798c3f6d45" type="script" releaseDate="20241123">
+      <package fileName="SetiAstroCosmicClarity11.23.2024_1.zip" sha1="724f91d6d5ee84213a2650dae6258324f6cf78a7" type="script" releaseDate="20241123">
          <title>
         Cosmic Clarity - Satellite Removal Tool V1.0
       </title>
@@ -18,4 +18,4 @@ Script for PI to interface with Seti Astro Comsic Clarity Satellite Removal Tool
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-11-23T19:10:04.004Z" encoding="Base64">0On457nV7cB1TyHlxysCEG4/nTg1a9d/HqsFQs5jFGtbhAl0GhdNG4QlDi513QzOzIX6Zj20j/PDdSpbPJm8Cw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-11-23T19:14:30.411Z" encoding="Base64">c36Xd9sNd6bfO7dvKNNHhmV4wLk1rxl59SdfdCrue9VhOr4Y6lc+es72w1ETbtZRJ48uV2kPnlXA3lj1/6yMAQ==</Signature>
