@@ -1188,6 +1188,36 @@ class BatchProcessor(QThread):
         finally:
             self.processing_complete.emit()
 
+class ProgressMonitorDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Processing Progress")
+        self.setGeometry(100, 100, 400, 200)
+
+        if hasattr(sys, '_MEIPASS'):
+            # PyInstaller path
+            icon_path = os.path.join(sys._MEIPASS, 'satellite.png')
+        else:
+            # Development path
+            icon_path = 'satellite.png'
+
+        self.setWindowIcon(QIcon(icon_path))
+
+        layout = QVBoxLayout()
+        self.progress_bar = QProgressBar(self)
+        self.log_display = QTextEdit(self)
+        self.log_display.setReadOnly(True)
+
+        layout.addWidget(QLabel("Processing..."))
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.log_display)
+        self.setLayout(layout)
+
+    def log_message(self, message):
+        self.log_display.append(message)
+
+    def update_progress(self, value):
+        self.progress_bar.setValue(int(value))
 
 
 if __name__ == "__main__":
@@ -1201,7 +1231,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # If arguments are provided, run in headless mode
+    app = QApplication([])  # Initialize the Qt application
+
     if args.input and args.output:
         try:
             input_dir = args.input
@@ -1218,11 +1249,33 @@ if __name__ == "__main__":
             models = load_models(exe_dir, use_gpu)
 
             if args.batch:
-                print("Starting batch processing...")
-                batch_processor = BatchProcessor(input_dir, output_dir, models, satellite_mode)
-                batch_processor.log_signal.connect(lambda msg: print(f"[LOG]: {msg}"))
-                batch_processor.run()
-                print("Batch processing complete.")
+                print("Starting batch processing in progress monitor...")
+
+                # Create and show progress monitor
+                progress_dialog = ProgressMonitorDialog()
+                progress_dialog.show()
+
+                # Define log and progress update functions
+                def log_message(msg):
+                    progress_dialog.log_message(msg)
+
+                def update_progress(value):
+                    progress_dialog.update_progress(value)
+
+                # Create and start batch processing
+                batch_processor = BatchProcessor(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    models=models,
+                    satellite_mode=satellite_mode
+                )
+                batch_processor.log_signal.connect(log_message)
+                batch_processor.progress_signal.connect(update_progress)
+                batch_processor.processing_complete.connect(progress_dialog.close)
+                batch_processor.start()
+
+                app.exec_()  # Execute the Qt event loop
+
             elif args.monitor:
                 print("Starting live folder monitoring...")
                 folder_monitor = FolderMonitor(input_dir, output_dir, models, satellite_mode)
@@ -1233,7 +1286,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error during headless execution: {e}")
     else:
-        # If no arguments are provided, launch the GUI
-        app = QApplication([])
+        print("No arguments provided. Launching GUI...")
         dialog = SatelliteToolDialog()
         dialog.exec_()
