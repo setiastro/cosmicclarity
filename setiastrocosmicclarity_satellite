@@ -29,13 +29,17 @@ from torchvision.models import ResNet18_Weights
 import lz4.block
 import zstandard
 
+import torch.sparse
+import torch._C
+
+
 # Custom Imports
 from xisf import XISF
 
 
 import argparse  # For command-line argument parsing
 
-
+GLOBAL_CLIP_TRAIL = False  # Default to False
 
 # Binary Classification Model (Satellite Detection Model)
 class BinaryClassificationCNN(nn.Module):
@@ -356,7 +360,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.0")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.1")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -433,6 +437,12 @@ class SatelliteToolDialog(QDialog):
         self.progress_bar.setValue(0)  # Initialize with 0%
         layout.addWidget(self.progress_bar)   
 
+        # Add "Clip Satellite Trail" checkbox
+        self.clip_trail_checkbox = QCheckBox("Clip Satellite Trail to 0.000")
+        self.clip_trail_checkbox.setChecked(False)  # Default unchecked
+        self.clip_trail_checkbox.stateChanged.connect(self.update_clip_trail)
+        layout.addWidget(self.clip_trail_checkbox)
+
         # Control buttons
         self.process_button = QPushButton("Batch Process Input Folder")
         self.process_button.clicked.connect(self.process_input_folder)        
@@ -469,6 +479,9 @@ class SatelliteToolDialog(QDialog):
         layout.addWidget(footer_label)
 
         self.setLayout(layout)
+
+    def update_clip_trail(self, state):
+        set_clip_trail(state == Qt.Checked)
 
     def update_progress_bar(self, progress):
         """Update the progress bar value."""
@@ -707,6 +720,9 @@ def load_detection_model(model_path, device):
     detection_model.to(device)
     return detection_model
 
+def set_clip_trail(value):
+    global GLOBAL_CLIP_TRAIL
+    GLOBAL_CLIP_TRAIL = value
 
 
 
@@ -953,9 +969,12 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
     total_chunks = len(chunks)
     satellited_chunks = []
     
+    global GLOBAL_CLIP_TRAIL  # Access the global variable
 
     # Apply satellite detection and removal models to each chunk
     for idx, (chunk, i, j) in enumerate(chunks):
+        original_chunk = chunk.copy()
+
         # Check for satellite trails in the chunk using the detection model
         if not contains_trail_with_ai(chunk, detection_model, device):
             # If no trail is detected, skip processing and add the original chunk
@@ -974,15 +993,32 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
 
         # Run the removal model
         with torch.no_grad():
-            satellited_chunk = removal_model(chunk_tensor).squeeze().cpu().numpy()
+            processed_chunk = removal_model(chunk_tensor).squeeze().cpu().numpy()
 
         # Convert the output back to its original format
         if chunk.ndim == 2 or chunk.shape[-1] == 1:  # Mono chunk
-            satellited_chunk = satellited_chunk[0]  # Use the first output channel
+            satellited_chunk = processed_chunk[0]  # Use the first output channel
         else:  # RGB chunk
-            satellited_chunk = satellited_chunk.transpose(1, 2, 0)  # Convert back to (H, W, C)
+            satellited_chunk = processed_chunk.transpose(1, 2, 0)  # Convert back to (H, W, C)
 
-        satellited_chunks.append((satellited_chunk, i, j))
+        if GLOBAL_CLIP_TRAIL:
+            # Compute satellite-only image
+            sattrail_only_image = original_chunk - satellited_chunk
+
+            # Clip and scale to isolate the satellite trail
+            mean_val = np.mean(sattrail_only_image)
+            clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
+
+            # Apply a binary mask: values below 0.5 are set to 0, values >= 0.5 are set to 1
+            binary_mask = np.where(clipped_image < 0.5, 0, 1)
+
+            # Subtract the binary mask from the original chunk
+            final_chunk = np.clip(original_chunk - binary_mask, 0, 1)
+        else:
+            final_chunk = satellited_chunk
+
+        satellited_chunks.append((final_chunk, i, j))
+
 
         # Update progress
         progress_percentage = (idx + 1) / total_chunks * 100
@@ -999,6 +1035,7 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
         satellited_chunks, image.shape, chunk_size=chunk_size, overlap=overlap
     )
     return satellited_image
+
 
 
 # Function to detect satellite trails in a chunk using the detection AI
@@ -1228,8 +1265,13 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, choices=["full", "luminance"], default="full", help="Satellite removal mode: 'full' or 'luminance'.")
     parser.add_argument("--batch", action="store_true", help="Enable batch processing mode for the input directory.")
     parser.add_argument("--monitor", action="store_true", help="Enable live folder monitoring for new files.")
+    parser.add_argument("--clip-trail", action="store_true", help="Clip satellite trail to 0.000 after processing.")
 
     args = parser.parse_args()
+
+    # Declare global before assignment
+
+    GLOBAL_CLIP_TRAIL = args.clip_trail  # Update based on the parsed argument
 
     app = QApplication([])  # Initialize the Qt application
 
@@ -1244,6 +1286,7 @@ if __name__ == "__main__":
             print(f"Output Directory: {output_dir}")
             print(f"Use GPU: {use_gpu}")
             print(f"Satellite Mode: {satellite_mode}")
+            print(f"Clip Trail: {GLOBAL_CLIP_TRAIL}")
 
             # Load models
             models = load_models(exe_dir, use_gpu)
