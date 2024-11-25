@@ -627,63 +627,49 @@ import numpy as np
 # Function to stretch an image
 def stretch_image(image):
     """
-    Perform a linear stretch on the image.
+    Perform a linear stretch on the image (unlinked for RGB).
     """
-    original_min = np.min(image)
+    original_min = np.min(image, axis=(0, 1)) if image.ndim == 3 else np.min(image)
     stretched_image = image - original_min  # Shift image so that the min is 0
-    original_median = np.median(stretched_image, axis=(0, 1)) if image.ndim == 3 else np.median(stretched_image)
-
-
-
     target_median = 0.25
+
     if image.ndim == 3:  # RGB image case
-        # Calculate the overall median for color images as in original code
-        median_color = np.mean(np.median(stretched_image, axis=(0, 1)))
-        stretched_image = ((median_color - 1) * target_median * stretched_image) / (
-            median_color * (target_median + stretched_image - 1) - target_median * stretched_image)
-        stretched_medians = np.median(stretched_image, axis=(0, 1))
+        # Stretch each channel independently
+        original_medians = np.median(stretched_image, axis=(0, 1))
+        stretched_image = np.array([
+            ((median - 1) * target_median * stretched_image[..., c]) / (
+                median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+            ) for c, median in enumerate(original_medians)
+        ]).transpose(1, 2, 0)
     else:  # Grayscale image case
-        image_median = np.median(stretched_image)
-        stretched_image = ((image_median - 1) * target_median * stretched_image) / (
-            image_median * (target_median + stretched_image - 1) - target_median * stretched_image)
-        stretched_medians = np.median(stretched_image)
-
-
+        original_medians = np.median(stretched_image)
+        stretched_image = ((original_medians - 1) * target_median * stretched_image) / (
+            original_medians * (target_median + stretched_image - 1) - target_median * stretched_image
+        )
 
     stretched_image = np.clip(stretched_image, 0, 1)  # Clip to [0, 1] range
-
-    return stretched_image, original_min, original_median
+    return stretched_image, original_min, original_medians
 
 # Function to unstretch an image with final median adjustment
-def unstretch_image(image, original_median, original_min):
+def unstretch_image(image, original_medians, original_min):
     """
-    Undo the stretch to return the image to the original linear state.
+    Undo the stretch to return the image to the original linear state (unlinked for RGB).
     """
     if image.ndim == 3:  # RGB image case
-        # Use the overall median to revert the stretch for color images
-        median_color = np.mean(np.median(image, axis=(0, 1)))
-        unstretched_image = ((median_color - 1) * original_median * image) / (
-            median_color * (original_median + image - 1) - original_median * image)
-        final_medians = np.median(unstretched_image, axis=(0, 1))
-
-        # Adjust each channel to match the original median
-        #for c in range(3):  # R, G, B channels
-        #    unstretched_image[..., c] *= original_median[c] / final_medians[c]
-        #adjusted_medians = np.median(unstretched_image, axis=(0, 1))
+        # Unstretch each channel independently
+        unstretched_image = np.array([
+            ((median - 1) * original_medians[c] * image[..., c]) / (
+                median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+            ) for c, median in enumerate(np.median(image, axis=(0, 1)))
+        ]).transpose(1, 2, 0)
     else:  # Grayscale image case
-        image_median = np.median(image)
-        unstretched_image = ((image_median - 1) * original_median * image) / (
-            image_median * (original_median + image - 1) - original_median * image)
-        final_medians = np.median(unstretched_image)
-
-        # Adjust for grayscale case
-        #unstretched_image *= original_median / final_medians
-        #adjusted_medians = np.median(unstretched_image)
-
+        median = np.median(image)
+        unstretched_image = ((median - 1) * original_medians * image) / (
+            median * (original_medians + image - 1) - original_medians * image
+        )
 
     unstretched_image += original_min  # Add back the original minimum
     unstretched_image = np.clip(unstretched_image, 0, 1)  # Clip to [0, 1] range
-
     return unstretched_image
 
 
@@ -934,6 +920,12 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         # Unstretch if stretched previously
         if stretch_needed:
             satellited_image = unstretch_image(satellited_image, original_median, original_min)
+
+        # If GLOBAL_CLIP_TRAIL is True, set pixels with the minimum value to 0
+        if GLOBAL_CLIP_TRAIL:
+            min_value = np.min(satellited_image)
+            satellited_image = np.where(satellited_image == min_value, 0.000, satellited_image)
+
 
         # Remove the border added around the image
         satellited_image = remove_border(satellited_image, border_size=16)
