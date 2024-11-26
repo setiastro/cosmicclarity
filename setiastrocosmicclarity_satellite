@@ -360,7 +360,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.1")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.1.1")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -622,7 +622,6 @@ def replace_border(original_image, processed_image, border_size=16):
     
     return processed_image
 
-import numpy as np
 
 # Function to stretch an image
 def stretch_image(image):
@@ -728,7 +727,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
     file_extension = os.path.splitext(image_path)[1].lower()
     if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
         print(f"Ignoring non-image file: {image_path}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     original_header = None
     image = None
@@ -843,9 +842,8 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
             # Load XISF file
             xisf = XISF(image_path)
             image = xisf.read_image(0)  # Assuming the image data is in the first image block
-            original_header = xisf.get_images_metadata()[0]  # Load metadata for header reconstruction
-            file_meta = xisf.get_file_metadata()  # For potential use if saving with the same meta
-            image_meta = xisf.get_images_metadata()[0]
+            image_meta = xisf.get_images_metadata()  # List of metadata blocks for each image
+            file_meta = xisf.get_file_metadata()  # File-level metadata
 
             # Determine bit depth
             if image.dtype == np.uint16:
@@ -865,7 +863,6 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
                 is_mono = False
 
             print(f"Loaded XISF image with bit depth: {bit_depth}, Mono: {is_mono}")
-            log_message(f"Loaded XISF image with bit depth: {bit_depth}, Mono: {is_mono}")
 
 
         else:  # Assume 8-bit PNG
@@ -876,9 +873,11 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
         if image is None:
             raise ValueError(f"Failed to load image from: {image_path}")
+        
+        original_image=image
 
         # Add a border around the image with the median value
-        image_with_border = add_border(image, border_size=16)
+        image_with_border = image #add_border(image, border_size=16)
 
         # Check if the image needs stretching based on its median value
         stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.08
@@ -928,16 +927,16 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
 
         # Remove the border added around the image
-        satellited_image = remove_border(satellited_image, border_size=16)
+        satellited_image = replace_border(original_image, satellited_image, border_size=16)
 
         assert satellited_image.dtype == np.float32, f"Image dtype is {satellited_image.dtype}, expected np.float32"
 
         log_message(f"Image {image_path} processed successfully.")
-        return satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta
+        return satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     
 # Function to satellite a single channel or 3-channel image
 def satellite_channel(image, device, removal_model, detection_model, is_mono=False, progress_signal=None):
@@ -1002,7 +1001,7 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
             clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
 
             # Apply a binary mask: values below 0.5 are set to 0, values >= 0.5 are set to 1
-            binary_mask = np.where(clipped_image < 0.5, 0, 1)
+            binary_mask = np.where(clipped_image < 0.1, 0, 1)
 
             # Subtract the binary mask from the original chunk
             final_chunk = np.clip(original_chunk - binary_mask, 0, 1)
@@ -1055,7 +1054,7 @@ def contains_trail_with_ai(chunk, detection_model, device):
 
     return output > 0.5  # Return True if trail is detected (output > 0.5)
 
-def save_processed_image(image, output_path, file_extension, bit_depth, original_header=None, is_mono=False, file_meta=None):
+def save_processed_image(image, output_path, file_extension, bit_depth, original_header=None, is_mono=False, file_meta=None, image_meta=None):
     """Save the processed image to the appropriate format."""
     if file_extension in ['.fits', '.fit']:
         # Save as FITS file with header information if the original was FITS
@@ -1116,12 +1115,48 @@ def save_processed_image(image, output_path, file_extension, bit_depth, original
             else:
                 tiff.imwrite(output_path, image.astype(np.float32))
     elif file_extension == '.xisf':
-        # Save as XISF
-        if is_mono:
-            rgb_image = np.stack([image[:, :, 0]] * 3, axis=-1).astype(np.float32)
-        else:
-            rgb_image = image.astype(np.float32)
-        XISF.write(output_path, rgb_image, xisf_metadata=file_meta)
+        try:
+            # Debug: Print original image details
+            print(f"Original image shape: {image.shape}, dtype: {image.dtype}")
+            print(f"Bit depth: {bit_depth}")
+
+            # Adjust bit depth
+            if bit_depth == "16-bit":
+                processed_image = (image * 65535).astype(np.uint16)
+            elif bit_depth == "32-bit unsigned":
+                processed_image = (image * 4294967295).astype(np.uint32)
+            else:  # Default to 32-bit float
+                processed_image = image.astype(np.float32)
+
+            # Adjust for mono images
+            if is_mono:
+                print("Preparing mono image...")
+                processed_image = processed_image[:, :, 0]  # Take the first channel
+                processed_image = processed_image[:, :, np.newaxis]  # Add back channel dimension
+                image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], 1)
+                image_meta[0]['colorSpace'] = 'Gray'  # Update metadata for mono
+
+
+            # Debug: Print processed image details
+            print(f"Processed image shape: {processed_image.shape}, dtype: {processed_image.dtype}")
+
+            # Save the image
+            XISF.write(
+                output_path,
+                processed_image,
+                creator_app="Seti Astro Cosmic Clarity",
+                image_metadata=image_meta[0],  # First block of image metadata
+                xisf_metadata=file_meta,       # File-level metadata
+                codec='lz4hc',
+                shuffle=True
+            )
+            print(f"Saved {bit_depth} XISF image as RGB with metadata to: {output_path}")
+
+        except Exception as e:
+            print(f"Error saving XISF file: {e}")
+
+
+
     else:
         # Save as 8-bit PNG
         satellited_image_8bit = (image * 255).astype(np.uint8)
@@ -1177,7 +1212,7 @@ class BatchProcessor(QThread):
                 self.log_signal.emit(f"Processing image: {image_name}")
 
                 try:
-                    satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta = satellite_image(
+                    satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta = satellite_image(
                         image_path,
                         self.models['device'],
                         self.models["detection_model"],
@@ -1197,7 +1232,8 @@ class BatchProcessor(QThread):
                             bit_depth,
                             original_header,
                             is_mono,
-                            file_meta
+                            file_meta,
+                            image_meta
                         )
                         self.log_signal.emit(f"Processed and saved: {output_image_name}")
                     else:
