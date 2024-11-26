@@ -143,11 +143,11 @@ def load_models(exe_dir, use_gpu=True):
     print(f"Using device: {device}")
 
     detection_model = BinaryClassificationCNN(input_channels=3)
-    detection_model.load_state_dict(torch.load(os.path.join(exe_dir, "satellite_trail_detector.pth"), map_location=device, weights_only=True))
+    detection_model.load_state_dict(torch.load(os.path.join(exe_dir, "satellite_trail_detector11.25fresh.pth"), map_location=device, weights_only=True))
     detection_model.eval().to(device)
 
     removal_model = SharpeningCNN()
-    removal_model.load_state_dict(torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"), map_location=device, weights_only=True))
+    removal_model.load_state_dict(torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps11.24.2024.pth"), map_location=device, weights_only=True))
     removal_model.eval().to(device)
 
     cached_models = {
@@ -318,7 +318,7 @@ class FolderMonitor(QThread):
 
                     try:
                         # Process the new file
-                        satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta = satellite_image(
+                        satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta = satellite_image(
                             file_path,
                             self.models['device'],
                             self.models['detection_model'],
@@ -337,7 +337,8 @@ class FolderMonitor(QThread):
                                 bit_depth,
                                 original_header,
                                 is_mono,
-                                file_meta
+                                file_meta,
+                                image_meta
                             )
                             self.log_signal.emit(f"Processed and saved: {output_image_name}")
 
