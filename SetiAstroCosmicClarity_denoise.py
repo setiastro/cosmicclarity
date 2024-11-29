@@ -17,6 +17,9 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox
 from tkinter import ttk
 import argparse  # For command-line argument parsing
+import onnxruntime as ort
+
+#torch.cuda.is_available = lambda: False
 
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
@@ -127,21 +130,77 @@ class DenoiseCNN(nn.Module):
 # Get the directory of the executable or the script location
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
-# Function to initialize and load the denoise model
-def load_model(exe_dir, use_gpu=True):
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+cached_models = None  # Cache to avoid reloading models unnecessarily
 
-    denoise_model = DenoiseCNN()
-    denoise_model.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_denoise_cnn.pth'), map_location=device))
+def load_models(exe_dir, use_gpu=True):
+    """
+    Load denoise models with support for CUDA, DirectML, and CPU fallback.
 
-    denoise_model.eval()
-    denoise_model.to(device)
+    Args:
+        exe_dir (str): Path to the executable directory.
+        use_gpu (bool): Whether to use GPU acceleration.
 
-    return {
-        "denoise_model": denoise_model,
-        "device": device
-    }
+    Returns:
+        dict: A dictionary containing the loaded models and their configurations.
+    """
+    global cached_models
+    device = None
+
+    if cached_models:
+        return cached_models
+
+    if torch.cuda.is_available() and use_gpu:
+        # Load PyTorch models with CUDA
+        print("Using device: CUDA (PyTorch)")
+        device = torch.device("cuda")
+
+        denoise_model = DenoiseCNN().to(device)
+        denoise_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
+        )
+        denoise_model.eval()
+
+        cached_models = {
+            "denoise_model": denoise_model,
+            "device": device,
+            "is_onnx": False,
+        }
+        return cached_models
+
+    elif "DmlExecutionProvider" in ort.get_available_providers() and use_gpu:
+        # Load ONNX models with DirectML
+        print("Using DirectML for ONNX Runtime.")
+        device = "DirectML"
+
+        denoise_model = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_denoise_cnn.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+
+        cached_models = {
+            "denoise_model": denoise_model,
+            "device": device,
+            "is_onnx": True,
+        }
+        return cached_models
+
+    else:
+        # Load PyTorch models with CPU fallback
+        print("Using device: CPU (PyTorch)")
+        device = torch.device("cpu")
+
+        denoise_model = DenoiseCNN().to(device)
+        denoise_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
+        )
+        denoise_model.eval()
+
+        cached_models = {
+            "denoise_model": denoise_model,
+            "device": device,
+            "is_onnx": False,
+        }
+        return cached_models
 
 # Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
 def extract_luminance(image):
@@ -399,7 +458,21 @@ def remove_border(image, border_size=5):
         return image[border_size:-border_size, border_size:-border_size, :]
 
 # Function to denoise the image
-def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance'):
+def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance', is_onnx=False):
+    """
+    Denoises the input image using the specified model and mode.
+
+    Args:
+        image_path (str): Path to the input image.
+        denoise_strength (float): Strength of the denoising effect.
+        device (torch.device or str): Device for PyTorch or ONNX inference.
+        model: PyTorch model or ONNX session for denoising.
+        denoise_mode (str): 'luminance' or 'full' denoising mode.
+        is_onnx (bool): Whether to use ONNX for inference.
+
+    Returns:
+        tuple: Denoised image, original header, bit depth, file extension, is_mono, and metadata.
+    """
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
     if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
@@ -551,8 +624,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         image_with_border = add_border(image, border_size=16)
 
         # Check if the image needs stretching based on its median value
+        stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.08
         original_median = np.median(image_with_border)
-        if original_median < 0.12:
+        if stretch_needed:
             stretched_image, original_min, original_median = stretch_image(image_with_border)
         else:
             stretched_image = image_with_border
@@ -560,7 +634,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
 
         # Process mono or color images
         if is_mono:
-            denoised_image = denoise_channel(stretched_image[:, :, 0], device, model, is_mono=True)  # Only one channel
+            denoised_image = denoise_channel(
+                stretched_image[:, :, 0], device, model, is_mono=True, is_onnx=is_onnx
+            )
             denoised_image = blend_images(stretched_image[:, :, 0], denoised_image, denoise_strength)
             denoised_image = denoised_image[:, :, np.newaxis]  # Convert back to single channel
 
@@ -570,16 +646,24 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
 
                 # Denoise only the luminance channel
-                denoised_luminance = denoise_channel(luminance, device, model, is_mono=True)
+                denoised_luminance = denoise_channel(
+                    luminance, device, model, is_mono=True, is_onnx=is_onnx
+                )
                 denoised_luminance = blend_images(luminance, denoised_luminance, denoise_strength)
 
                 # Merge denoised luminance back with chrominance channels
                 denoised_image = merge_luminance(denoised_luminance, cb_channel, cr_channel)
 
             else:  # Full RGB denoising mode
-                denoised_r = denoise_channel(stretched_image[:, :, 0], device, model, is_mono=True)
-                denoised_g = denoise_channel(stretched_image[:, :, 1], device, model, is_mono=True)
-                denoised_b = denoise_channel(stretched_image[:, :, 2], device, model, is_mono=True)
+                denoised_r = denoise_channel(
+                    stretched_image[:, :, 0], device, model, is_mono=True, is_onnx=is_onnx
+                )
+                denoised_g = denoise_channel(
+                    stretched_image[:, :, 1], device, model, is_mono=True, is_onnx=is_onnx
+                )
+                denoised_b = denoise_channel(
+                    stretched_image[:, :, 2], device, model, is_mono=True, is_onnx=is_onnx
+                )
 
                 denoised_image = np.stack([
                     blend_images(stretched_image[:, :, 0], denoised_r, denoise_strength),
@@ -588,7 +672,7 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 ], axis=-1)
 
         # Unstretch if stretched previously
-        if original_min is not None:
+        if stretch_needed:
             denoised_image = unstretch_image(denoised_image, original_median, original_min)
 
         # Remove the border added around the image
@@ -601,23 +685,59 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         return None, None, None, None, None, None
     
 # Function to denoise a single channel
-def denoise_channel(channel, device, model, is_mono=False):
-    # Split channel into chunks
+def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
+    """
+    Denoises a single image channel using the specified model.
+
+    Args:
+        channel (numpy.ndarray): The input image channel to denoise.
+        device (torch.device or str): Device for PyTorch or ONNX inference.
+        model: PyTorch model or ONNX inference session.
+        is_mono (bool): Whether the input is monochrome.
+        is_onnx (bool): Whether to use ONNX for inference.
+
+    Returns:
+        numpy.ndarray: The denoised image channel.
+    """
     chunk_size = 256
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
 
     denoised_chunks = []
 
-    # Apply denoise model to each chunk
     for idx, (chunk, i, j) in enumerate(chunks):
-        # Prepare the chunk tensor
-        chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-        chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Stack to 3 channels for model
+        original_chunk_shape = chunk.shape
+        if is_onnx:
+            # Prepare ONNX input: Expand to 3 channels
+            chunk_input = chunk[np.newaxis, np.newaxis, :, :].astype(np.float32)  # Shape: (1, 1, H, W)
+            chunk_input = np.tile(chunk_input, (1, 3, 1, 1))  # Shape: (1, 3, H, W)
 
-        # Run the denoising model
-        with torch.no_grad():
-            denoised_chunk = model(chunk_tensor).squeeze().cpu().numpy()[0]  # Use only the first output channel
+            # Pad the chunk to 256x256 if necessary
+            if chunk_input.shape[2] != chunk_size or chunk_input.shape[3] != chunk_size:
+                padded_chunk = np.zeros((1, 3, chunk_size, chunk_size), dtype=np.float32)  # Create empty padded array
+                padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input  # Copy data into padded array
+                chunk_input = padded_chunk
+
+            # ONNX inference
+            input_name = model.get_inputs()[0].name
+            try:
+                denoised_chunk = model.run(None, {input_name: chunk_input})[0]  # Run ONNX model
+                denoised_chunk = denoised_chunk[0, 0, :original_chunk_shape[0], :original_chunk_shape[1]]  # Crop back to original size
+            except Exception as e:
+                print(f"ONNX inference error for chunk at ({i}, {j}): {e}")
+                raise
+        else:
+            # Prepare PyTorch input
+            chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+            if not is_mono:
+                chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Expand to 3 channels for RGB models
+            else:
+                # For grayscale images, explicitly expand to 3 channels
+                chunk_tensor = chunk_tensor.expand(1, 3, chunk_tensor.shape[2], chunk_tensor.shape[3])
+
+            # PyTorch inference
+            with torch.no_grad():
+                denoised_chunk = model(chunk_tensor).squeeze().cpu().numpy()[0]  # Use only the first output channel
 
         denoised_chunks.append((denoised_chunk, i, j))
 
@@ -629,6 +749,8 @@ def denoise_channel(channel, device, model, is_mono=False):
     return denoised_channel
 
 
+
+
 # Main process for denoising images
 def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
     print((r"""
@@ -637,7 +759,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.5.1                     # 
+ *#              Cosmic Clarity - Denoise V5.6                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -653,13 +775,22 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
         os.makedirs(output_dir)
 
     # Load the denoise model
-    models = load_model(exe_dir, use_gpu)
+    models = load_models(exe_dir, use_gpu)
+
+    # Determine whether we're using ONNX or PyTorch
+    is_onnx = models["is_onnx"]
+    print(f"Using {'ONNX' if is_onnx else 'PyTorch'} model for inference.")
 
     # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
         denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta = denoise_image(
-            image_path, denoise_strength, models['device'], models["denoise_model"], denoise_mode
+            image_path, 
+            denoise_strength, 
+            models['device'], 
+            models["denoise_model"], 
+            denoise_mode=denoise_mode, 
+            is_onnx=is_onnx
         )
 
         if denoised_image is not None:
