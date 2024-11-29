@@ -19,6 +19,9 @@ import argparse  # For command-line argument parsing
 import time  # For simulating progress updates
 from tkinter import ttk
 from tkinter import filedialog
+import onnxruntime as ort
+
+#torch.cuda.is_available = lambda: False
 
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
@@ -128,46 +131,125 @@ class SharpeningCNN(nn.Module):
 # Get the directory of the executable or the script location
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
-# Function to initialize and load models
 def load_models(exe_dir, use_gpu=True):
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    """
+    Load models with support for CUDA, DirectML, and CPU.
 
-    stellar_model_radius_1 = SharpeningCNN()
-    nonstellar_model_radius_1 = SharpeningCNN()
-    nonstellar_model_radius_2 = SharpeningCNN()
-    nonstellar_model_radius_4 = SharpeningCNN()
-    nonstellar_model_radius_8 = SharpeningCNN()
+    Args:
+        exe_dir (str): Path to the executable directory.
+        use_gpu (bool): Whether to use GPU acceleration.
 
-    # Load models onto the correct device
-    stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_sharp_stellar_cnn.pth'), map_location=device))
-    nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_1.pth'), map_location=device))
-    nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_2.pth'), map_location=device))
-    nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_4.pth'), map_location=device))
-    nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_8.pth'), map_location=device))
+    Returns:
+        dict: A dictionary containing the loaded models and their configurations.
+    """
+    device = None
 
-    # Set models to evaluation mode
-    stellar_model_radius_1.eval()
-    nonstellar_model_radius_1.eval()
-    nonstellar_model_radius_2.eval()
-    nonstellar_model_radius_4.eval()
-    nonstellar_model_radius_8.eval()
+    if torch.cuda.is_available() and use_gpu:
+        # Load CUDA models
+        device = torch.device("cuda")
+        print(f"Using device: {device} (CUDA)")
 
-    # Move models to the correct device
-    stellar_model_radius_1.to(device)
-    nonstellar_model_radius_1.to(device)
-    nonstellar_model_radius_2.to(device)
-    nonstellar_model_radius_4.to(device)
-    nonstellar_model_radius_8.to(device)
+        stellar_model_radius_1 = SharpeningCNN()
+        nonstellar_model_radius_1 = SharpeningCNN()
+        nonstellar_model_radius_2 = SharpeningCNN()
+        nonstellar_model_radius_4 = SharpeningCNN()
+        nonstellar_model_radius_8 = SharpeningCNN()
 
-    return {
-        "stellar_model": stellar_model_radius_1,
-        "nonstellar_model_1": nonstellar_model_radius_1,
-        "nonstellar_model_2": nonstellar_model_radius_2,
-        "nonstellar_model_4": nonstellar_model_radius_4,
-        "nonstellar_model_8": nonstellar_model_radius_8,
-        "device": device
-    }
+        # Load PyTorch models
+        stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_sharp_stellar_cnn.pth'), map_location=device))
+        nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_1.pth'), map_location=device))
+        nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_2.pth'), map_location=device))
+        nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_4.pth'), map_location=device))
+        nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_8.pth'), map_location=device))
+
+        # Set models to evaluation mode
+        stellar_model_radius_1.eval().to(device)
+        nonstellar_model_radius_1.eval().to(device)
+        nonstellar_model_radius_2.eval().to(device)
+        nonstellar_model_radius_4.eval().to(device)
+        nonstellar_model_radius_8.eval().to(device)
+
+        return {
+            "stellar_model": stellar_model_radius_1,
+            "nonstellar_model_1": nonstellar_model_radius_1,
+            "nonstellar_model_2": nonstellar_model_radius_2,
+            "nonstellar_model_4": nonstellar_model_radius_4,
+            "nonstellar_model_8": nonstellar_model_radius_8,
+            "device": device,
+            "is_onnx": False,
+        }
+
+    elif "DmlExecutionProvider" in ort.get_available_providers() and use_gpu:
+        # Load ONNX models with DirectML
+        print("Using DirectML for ONNX Runtime.")
+        device = "DirectML"
+
+        stellar_model = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_sharp_stellar_cnn.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+        nonstellar_model_1 = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_1.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+        nonstellar_model_2 = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_2.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+        nonstellar_model_4 = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_4.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+        nonstellar_model_8 = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_8.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+
+        return {
+            "stellar_model": stellar_model,
+            "nonstellar_model_1": nonstellar_model_1,
+            "nonstellar_model_2": nonstellar_model_2,
+            "nonstellar_model_4": nonstellar_model_4,
+            "nonstellar_model_8": nonstellar_model_8,
+            "device": device,
+            "is_onnx": True,
+        }
+
+    else:
+        # Fallback to CPU
+        print("No GPU acceleration available. Using CPU.")
+        device = torch.device("cpu")
+
+        stellar_model_radius_1 = SharpeningCNN()
+        nonstellar_model_radius_1 = SharpeningCNN()
+        nonstellar_model_radius_2 = SharpeningCNN()
+        nonstellar_model_radius_4 = SharpeningCNN()
+        nonstellar_model_radius_8 = SharpeningCNN()
+
+        # Load PyTorch models
+        stellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_sharp_stellar_cnn.pth'), map_location=device))
+        nonstellar_model_radius_1.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_1.pth'), map_location=device))
+        nonstellar_model_radius_2.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_2.pth'), map_location=device))
+        nonstellar_model_radius_4.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_4.pth'), map_location=device))
+        nonstellar_model_radius_8.load_state_dict(torch.load(os.path.join(exe_dir, 'deep_nonstellar_sharp_cnn_radius_8.pth'), map_location=device))
+
+        # Set models to evaluation mode
+        stellar_model_radius_1.eval().to(device)
+        nonstellar_model_radius_1.eval().to(device)
+        nonstellar_model_radius_2.eval().to(device)
+        nonstellar_model_radius_4.eval().to(device)
+        nonstellar_model_radius_8.eval().to(device)
+
+        return {
+            "stellar_model": stellar_model_radius_1,
+            "nonstellar_model_1": nonstellar_model_radius_1,
+            "nonstellar_model_2": nonstellar_model_radius_2,
+            "nonstellar_model_4": nonstellar_model_radius_4,
+            "nonstellar_model_8": nonstellar_model_radius_8,
+            "device": device,
+            "is_onnx": False,
+        }
+
 
 # Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
 def extract_luminance(image):
@@ -655,11 +737,13 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
 
     # Stretch the image if needed
-    stretch_needed = np.median(image_with_border) < 0.12
+    stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.08
+    original_median = np.median(image_with_border)
     if stretch_needed:
         stretched_image, original_min, original_median = stretch_image(image_with_border)
     else:
         stretched_image = image_with_border
+        original_min = None
 
         
 
@@ -674,13 +758,11 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         sharpened_b = sharpen_channel(b_channel, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models)
         sharpened_image = np.stack([sharpened_r, sharpened_g, sharpened_b], axis=-1)
     else:
-        # Extract luminance (for color images) or handle grayscale images directly in 32-bit float
+        # Extract luminance (for color images) or handle grayscale images directly
         if len(stretched_image.shape) == 3:
-            # Call the updated `extract_luminance` function that maintains 32-bit precision
             luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
         else:
             luminance = stretched_image
-
 
         chunks = split_image_into_chunks_with_overlap(luminance, chunk_size=256, overlap=64)
         total_chunks = len(chunks)
@@ -693,22 +775,45 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
         if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
             print("Stellar Sharpening:")
             for idx, (chunk, i, j, is_edge) in enumerate(chunks):
-                chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    stellar_sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
+                original_shape = chunk.shape
+                if models.get("is_onnx"):
+                    # ONNX inference
+                    chunk_input = chunk[np.newaxis, np.newaxis, :, :].astype(np.float32)  # (1, 1, H, W)
+                    chunk_input = np.tile(chunk_input, (1, 3, 1, 1))  # Expand to 3 channels: (1, 3, H, W)
+
+                    # Pad chunk to 256x256 if dimensions don't match
+                    if chunk_input.shape[2] != 256 or chunk_input.shape[3] != 256:
+                        padded_chunk = np.zeros((1, 3, 256, 256), dtype=np.float32)  # Create a padded chunk
+                        padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input  # Copy original data
+                        chunk_input = padded_chunk
+
+                    input_name = models["stellar_model"].get_inputs()[0].name
+                    output_name = models["stellar_model"].get_outputs()[0].name
+                    try:
+                        stellar_sharpened_chunk = models["stellar_model"].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                    except Exception as e:
+                        print(f"ONNX inference error for stellar chunk at ({i}, {j}): {e}")
+                        raise
+                    
+                    # Crop the processed chunk back to the original shape
+                    stellar_sharpened_chunk = stellar_sharpened_chunk[:original_shape[0], :original_shape[1]]
+                else:
+                    # PyTorch inference
+                    chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+                    with torch.no_grad():
+                        stellar_sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().numpy()[0]
+
                 blended_stellar_chunk = blend_images(chunk, stellar_sharpened_chunk, stellar_amount)
                 stellar_sharpened_chunks.append((blended_stellar_chunk, i, j, is_edge))
                 show_progress(idx + 1, total_chunks)
 
-            print("")  # Add a newline after stellar sharpening progress
+            print("")
             stellar_sharpened_luminance = stitch_chunks_ignore_border(stellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
 
-            # If only stellar sharpening is selected, set final luminance and skip non-stellar
             if sharpening_mode == "Stellar Only":
                 sharpened_luminance = stellar_sharpened_luminance
             else:
-                # Pass to non-stellar sharpening
-                luminance = stellar_sharpened_luminance
+                luminance = stellar_sharpened_luminance  # Pass to non-stellar sharpening
 
         # Non-stellar sharpening and blending with `nonstellar_amount`
         nonstellar_sharpened_chunks = []
@@ -721,31 +826,72 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
         if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
             print("Non-Stellar Sharpening:")
-            for idx, (chunk, i, j, is_edge) in enumerate(split_image_into_chunks_with_overlap(luminance, chunk_size=256, overlap=64)):
-                chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+            for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+                original_shape = chunk.shape  # Save original dimensions for cropping later
 
-                if nonstellar_strength in [1, 2, 4, 8]:
-                    with torch.no_grad():
+                if models.get("is_onnx"):
+                    # Prepare ONNX input
+                    chunk_input = chunk[np.newaxis, np.newaxis, :, :].astype(np.float32)  # Shape: (1, 1, H, W)
+                    chunk_input = np.tile(chunk_input, (1, 3, 1, 1))  # Expand to 3 channels: (1, 3, H, W)
+
+                    # Pad the chunk to 256x256 if necessary
+                    if chunk_input.shape[2] != 256 or chunk_input.shape[3] != 256:
+                        padded_chunk = np.zeros((1, 3, 256, 256), dtype=np.float32)
+                        padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input
+                        chunk_input = padded_chunk
+
+                    input_name = model_map[1].get_inputs()[0].name
+                    output_name = model_map[1].get_outputs()[0].name
+
+                    # Handle different nonstellar_strength cases
+                    if nonstellar_strength in [1, 2, 4, 8]:
+                        # Direct model usage
                         active_model = model_map[int(nonstellar_strength)]
-                        sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                else:
-                    if 1 < nonstellar_strength < 2:
-                        # Interpolation between model 1 and model 2
-                        sharpened_chunk_a = model_map[1](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                        sharpened_chunk_b = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                        sharpened_chunk = interpolate_nonstellar_sharpening(sharpened_chunk_a, sharpened_chunk_b, None, None, nonstellar_strength)
-                    elif 2 <= nonstellar_strength < 4:
-                        # Interpolation between model 2 and model 4
-                        sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                        sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                        sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
-                    elif 4 <= nonstellar_strength < 8:
-                        # Interpolation between model 4 and model 8
-                        sharpened_chunk_a = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                        sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                        sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+                        sharpened_chunk = active_model.run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
                     else:
-                        raise ValueError(f"Invalid nonstellar_strength value: {nonstellar_strength}")
+                        # Interpolation between models
+                        if 1 < nonstellar_strength < 2:
+                            # Interpolate between models 1 and 2
+                            sharpened_chunk_a = model_map[1].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                            sharpened_chunk_b = model_map[2].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                            sharpened_chunk = interpolate_nonstellar_sharpening(sharpened_chunk_a, sharpened_chunk_b, None, None, nonstellar_strength)
+                        elif 2 <= nonstellar_strength < 4:
+                            # Interpolate between models 2 and 4
+                            sharpened_chunk_a = model_map[2].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                            sharpened_chunk_b = model_map[4].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                            sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
+                        elif 4 <= nonstellar_strength < 8:
+                            # Interpolate between models 4 and 8
+                            sharpened_chunk_a = model_map[4].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                            sharpened_chunk_b = model_map[8].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                            sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+                        else:
+                            raise ValueError(f"Invalid nonstellar_strength value: {nonstellar_strength}")
+
+                    # Crop the processed chunk back to its original dimensions
+                    sharpened_chunk = sharpened_chunk[:original_shape[0], :original_shape[1]]
+                else:
+                    # PyTorch inference
+                    chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+                    if nonstellar_strength in [1, 2, 4, 8]:
+                        with torch.no_grad():
+                            active_model = model_map[int(nonstellar_strength)]
+                            sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                    else:
+                        # Interpolation between PyTorch models
+                        if 1 < nonstellar_strength < 2:
+                            sharpened_chunk_a = model_map[1](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                            sharpened_chunk_b = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                            sharpened_chunk = interpolate_nonstellar_sharpening(sharpened_chunk_a, sharpened_chunk_b, None, None, nonstellar_strength)
+                        elif 2 <= nonstellar_strength < 4:
+                            sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                            sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                            sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
+                        elif 4 <= nonstellar_strength < 8:
+                            sharpened_chunk_a = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                            sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                            sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+
 
 
                 blended_nonstellar_chunk = blend_images(chunk, sharpened_chunk, nonstellar_amount)
@@ -788,11 +934,36 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
     if sharpening_mode == "Stellar Only" or sharpening_mode == "Both":
         print("Stellar Sharpening Channel:")
         for idx, (chunk, i, j, is_edge) in enumerate(chunks):
-            chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
-            with torch.no_grad():
-                stellar_sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-            
-            # Apply stellar amount blending immediately after stellar sharpening
+            original_shape = chunk.shape
+            if models.get("is_onnx"):
+                # ONNX inference
+                chunk_input = chunk[np.newaxis, np.newaxis, :, :].astype(np.float32)  # (1, 1, H, W)
+                chunk_input = np.tile(chunk_input, (1, 3, 1, 1))  # Expand to 3 channels: (1, 3, H, W)
+
+                # Pad chunk to 256x256 if dimensions don't match
+                if chunk_input.shape[2] != 256 or chunk_input.shape[3] != 256:
+                    padded_chunk = np.zeros((1, 3, 256, 256), dtype=np.float32)  # Create a padded chunk
+                    padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input  # Copy original data
+                    chunk_input = padded_chunk
+
+                input_name = models["stellar_model"].get_inputs()[0].name
+                output_name = models["stellar_model"].get_outputs()[0].name
+                try:
+                    stellar_sharpened_chunk = models["stellar_model"].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                except Exception as e:
+                    print(f"ONNX inference error for stellar chunk at ({i}, {j}): {e}")
+                    raise
+                
+                # Crop the processed chunk back to the original shape
+                stellar_sharpened_chunk = stellar_sharpened_chunk[:original_shape[0], :original_shape[1]]
+
+            else:
+                # PyTorch inference for stellar sharpening
+                chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    stellar_sharpened_chunk = models["stellar_model"](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().numpy()[0]
+
+            # Apply stellar amount blending
             blended_stellar_chunk = blend_images(chunk, stellar_sharpened_chunk, stellar_amount)
             stellar_sharpened_chunks.append((blended_stellar_chunk, i, j, is_edge))
             show_progress(idx + 1, total_chunks)
@@ -800,12 +971,10 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
         print("")  # Add a newline after stellar sharpening progress
         stellar_sharpened = stitch_chunks_ignore_border(stellar_sharpened_chunks, channel.shape, chunk_size=256, overlap=64)
 
-        # If only stellar sharpening is selected, set final channel output
         if sharpening_mode == "Stellar Only":
             sharpened_channel = stellar_sharpened
         else:
-            # Use stellar-sharpened (and blended) result as input for non-stellar sharpening if "Both" is selected
-            channel = stellar_sharpened
+            channel = stellar_sharpened  # Use stellar-sharpened as input for non-stellar sharpening
 
     # Use dictionary to select the non-stellar model based on nonstellar_strength
     model_map = {
@@ -817,26 +986,74 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
 
     # Apply non-stellar sharpening if applicable
     if sharpening_mode == "Non-Stellar Only" or sharpening_mode == "Both":
-        print("Non-Stellar Sharpening Channel:")
-        for idx, (chunk, i, j, is_edge) in enumerate(split_image_into_chunks_with_overlap(channel, chunk_size=256, overlap=64)):
-            chunk_tensor = torch.tensor(chunk).unsqueeze(0).unsqueeze(0).to(device)
+        print("Non-Stellar Sharpening:")
+        for idx, (chunk, i, j, is_edge) in enumerate(chunks):
+            original_shape = chunk.shape  # Save original dimensions for cropping later
 
-            if nonstellar_strength in [1, 2, 4, 8]:
-                with torch.no_grad():
+            if models.get("is_onnx"):
+                # Prepare ONNX input
+                chunk_input = chunk[np.newaxis, np.newaxis, :, :].astype(np.float32)  # Shape: (1, 1, H, W)
+                chunk_input = np.tile(chunk_input, (1, 3, 1, 1))  # Expand to 3 channels: (1, 3, H, W)
+
+                # Pad the chunk to 256x256 if necessary
+                if chunk_input.shape[2] != 256 or chunk_input.shape[3] != 256:
+                    padded_chunk = np.zeros((1, 3, 256, 256), dtype=np.float32)
+                    padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input
+                    chunk_input = padded_chunk
+
+                input_name = model_map[1].get_inputs()[0].name
+                output_name = model_map[1].get_outputs()[0].name
+
+                # Handle different nonstellar_strength cases
+                if nonstellar_strength in [1, 2, 4, 8]:
+                    # Direct model usage
                     active_model = model_map[int(nonstellar_strength)]
-                    sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-            else:
-                # Interpolate for nonstellar_strength values between models
-                if nonstellar_strength <= 4:
-                    sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                    sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                    sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
+                    sharpened_chunk = active_model.run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
                 else:
-                    sharpened_chunk_a = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                    sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().cpu().detach().numpy()[0]
-                    sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+                    # Interpolation between models
+                    if 1 < nonstellar_strength < 2:
+                        # Interpolate between models 1 and 2
+                        sharpened_chunk_a = model_map[1].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                        sharpened_chunk_b = model_map[2].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(sharpened_chunk_a, sharpened_chunk_b, None, None, nonstellar_strength)
+                    elif 2 <= nonstellar_strength < 4:
+                        # Interpolate between models 2 and 4
+                        sharpened_chunk_a = model_map[2].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                        sharpened_chunk_b = model_map[4].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
+                    elif 4 <= nonstellar_strength < 8:
+                        # Interpolate between models 4 and 8
+                        sharpened_chunk_a = model_map[4].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                        sharpened_chunk_b = model_map[8].run([output_name], {input_name: chunk_input})[0][0, 0, :, :]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+                    else:
+                        raise ValueError(f"Invalid nonstellar_strength value: {nonstellar_strength}")
 
-            # Blend with the stellar-sharpened (and blended) chunk to apply nonstellar_amount
+                # Crop the processed chunk back to its original dimensions
+                sharpened_chunk = sharpened_chunk[:original_shape[0], :original_shape[1]]
+            else:
+                # PyTorch inference
+                chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+                if nonstellar_strength in [1, 2, 4, 8]:
+                    with torch.no_grad():
+                        active_model = model_map[int(nonstellar_strength)]
+                        sharpened_chunk = active_model(chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                else:
+                    # Interpolation between PyTorch models
+                    if 1 < nonstellar_strength < 2:
+                        sharpened_chunk_a = model_map[1](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                        sharpened_chunk_b = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(sharpened_chunk_a, sharpened_chunk_b, None, None, nonstellar_strength)
+                    elif 2 <= nonstellar_strength < 4:
+                        sharpened_chunk_a = model_map[2](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                        sharpened_chunk_b = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(None, sharpened_chunk_a, sharpened_chunk_b, None, nonstellar_strength)
+                    elif 4 <= nonstellar_strength < 8:
+                        sharpened_chunk_a = model_map[4](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                        sharpened_chunk_b = model_map[8](chunk_tensor.repeat(1, 3, 1, 1)).squeeze().detach().cpu().numpy()[0]
+                        sharpened_chunk = interpolate_nonstellar_sharpening(None, None, sharpened_chunk_a, sharpened_chunk_b, nonstellar_strength)
+
+            # Blend with the input chunk and apply nonstellar_amount
             blended_nonstellar_chunk = blend_images(chunk, sharpened_chunk, nonstellar_amount)
             nonstellar_sharpened_chunks.append((blended_nonstellar_chunk, i, j, is_edge))
             show_progress(idx + 1, total_chunks)
@@ -844,7 +1061,7 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
         print("")  # Add a newline after non-stellar sharpening channel progress
         nonstellar_sharpened = stitch_chunks_ignore_border(nonstellar_sharpened_chunks, channel.shape, chunk_size=256, overlap=64)
 
-        # Set the final sharpened channel output to the non-stellar sharpened and blended result
+        # Set the final sharpened channel output to the non-stellar sharpened result
         sharpened_channel = nonstellar_sharpened
 
     return sharpened_channel
@@ -858,7 +1075,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.5.1                     # 
+ *#              Cosmic Clarity - Sharpen V5.6                       # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -877,9 +1094,12 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
 
-        # Capture both sharpened_image and is_mono
-        sharpened_image, is_mono, original_header, bit_depth, file_meta, image_meta = sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, models['device'], models, sharpen_channels_separately)
-
+        # Sharpen the image
+        sharpened_image, is_mono, original_header, bit_depth, file_meta, image_meta = sharpen_image(
+            image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount,
+            models['device'], models, sharpen_channels_separately
+        )
+        
         if sharpened_image is not None:
             file_extension = os.path.splitext(image_name)[1].lower()
             output_image_path = os.path.join(output_dir, os.path.splitext(image_name)[0] + "_sharpened" + file_extension)
