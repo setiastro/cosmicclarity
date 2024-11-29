@@ -31,13 +31,15 @@ import zstandard
 
 import torch.sparse
 import torch._C
+import onnxruntime as ort
 
+#torch.cuda.is_available = lambda: False
 
 # Custom Imports
 from xisf import XISF
+from skimage.transform import resize
 
-
-import argparse  # For command-line argument parsing
+#import argparse  # For command-line argument parsing
 
 GLOBAL_CLIP_TRAIL = False  # Default to False
 
@@ -135,27 +137,129 @@ exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else 
 cached_models = None
 
 def load_models(exe_dir, use_gpu=True):
+    """
+    Load models with separate handling for CUDA, DirectML, and CPU.
+
+    Args:
+        exe_dir (str): Path to the executable directory.
+        use_gpu (bool): Whether to use GPU acceleration.
+
+    Returns:
+        dict: A dictionary containing the loaded models and their configurations.
+    """
     global cached_models
-    if cached_models:
+    device = None
+
+    if torch.cuda.is_available() and use_gpu:
+        # Load CUDA models
+        if cached_models:
+            return cached_models
+
+        device = torch.device("cuda")
+        print(f"Using device: {device} (CUDA)")
+
+        # Load PyTorch detection model
+        detection_model = BinaryClassificationCNN(input_channels=3).to(device)
+        detection_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satellite_trail_detector.pth"), 
+                       map_location=device, weights_only=True)
+        )
+        detection_model.eval().to(device)
+
+        # Load PyTorch removal model
+        removal_model = SharpeningCNN().to(device)
+        removal_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"), 
+                       map_location=device, weights_only=True)
+        )
+        removal_model.eval().to(device)
+
+        # Cache and return models
+        cached_models = {
+            "detection_model": detection_model,
+            "removal_model": removal_model,
+            "device": device,
+            "is_onnx": False,
+        }
         return cached_models
 
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    elif "DmlExecutionProvider" in ort.get_available_providers() and use_gpu:
+        # Load DirectML models
+        print("Using DirectML for ONNX Runtime.")
 
-    detection_model = BinaryClassificationCNN(input_channels=3)
-    detection_model.load_state_dict(torch.load(os.path.join(exe_dir, "satellite_trail_detector11.25fresh.pth"), map_location=device, weights_only=True))
+        device = "DirectML"  # Representing device as a string for DirectML
+        detection_model = ort.InferenceSession(
+            os.path.join(exe_dir, "satellite_trail_detector.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+
+        removal_model = ort.InferenceSession(
+            os.path.join(exe_dir, "satelliteremoval128featuremaps.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
+
+        # Return ONNX models
+        return {
+            "detection_model": detection_model,
+            "removal_model": removal_model,
+            "device": device,
+            "is_onnx": True,
+        }
+
+    else:
+        # CPU fallback
+        print("No GPU acceleration available. Using CPU.")
+
+        device = torch.device("cpu")
+
+        # Load PyTorch detection model
+        detection_model = BinaryClassificationCNN(input_channels=3).to(device)
+        detection_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satellite_trail_detector.pth"), 
+                       map_location=device, weights_only=True)
+        )
+        detection_model.eval().to(device)
+
+        # Load PyTorch removal model
+        removal_model = SharpeningCNN().to(device)
+        removal_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"), 
+                       map_location=device, weights_only=True)
+        )
+        removal_model.eval().to(device)
+
+        return {
+            "detection_model": detection_model,
+            "removal_model": removal_model,
+            "device": device,
+            "is_onnx": False,
+        }
+
+
+
+
+def load_detection_model(model_path, device, is_onnx=False):
+    """
+    Load the pre-trained satellite detection model.
+
+    Args:
+        model_path (str): Path to the detection model.
+        device (torch.device): Device to load the model onto.
+        is_onnx (bool): Whether to use ONNX Runtime for DirectML.
+
+    Returns:
+        torch.nn.Module or ort.InferenceSession: The detection model.
+    """
+    if is_onnx:
+        # Load ONNX model for DirectML
+        return ort.InferenceSession(model_path, providers=["DmlExecutionProvider"])
+
+    # Load PyTorch detection model
+    detection_model = BinaryClassificationCNN(input_channels=3).to(device)
+    detection_model.load_state_dict(torch.load(model_path, map_location=device))
     detection_model.eval().to(device)
-
-    removal_model = SharpeningCNN()
-    removal_model.load_state_dict(torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps11.24.2024.pth"), map_location=device, weights_only=True))
-    removal_model.eval().to(device)
-
-    cached_models = {
-        "detection_model": detection_model,
-        "removal_model": removal_model,
-        "device": device
-    }
-    return cached_models
+    print(f"Detection model loaded onto device: {device}")
+    return detection_model
 
 
 # Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
@@ -275,6 +379,7 @@ class FolderMonitor(QThread):
         self.models = models
         self.satellite_mode = satellite_mode
         self.running = True
+        self.is_onnx = models.get("is_onnx", False)
         self.processed_files = set()  # Initialize processed files list
 
     def log_message(self, message):
@@ -325,7 +430,8 @@ class FolderMonitor(QThread):
                             self.models['removal_model'],
                             self.satellite_mode,
                             log_signal=self.log_signal,
-                            progress_signal=self.progress_signal
+                            progress_signal=self.progress_signal,
+                            is_onnx=self.is_onnx  # Pass ONNX flag
                         )
                         if satellited_image is not None:
                             output_image_name = os.path.splitext(new_file)[0] + "_satellited" + file_extension
@@ -361,7 +467,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.1.1")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.2")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -714,7 +820,7 @@ def set_clip_trail(value):
 
 
 # Function to satellite the image
-def satellite_image(image_path, device, detection_model, removal_model, satellite_mode='luminance', progress_signal=None, log_signal=None):
+def satellite_image(image_path, device, detection_model, removal_model, satellite_mode='luminance', progress_signal=None, log_signal=None, is_onnx=False):
     def log_message(message):
         print(message)  # Always log to console
         if log_signal:
@@ -899,7 +1005,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         if satellite_mode == 'luminance' and is_mono:
             # Extract luminance (single-channel processing for mono)
             satellited_image = satellite_channel(
-                stretched_image[:, :, 0], device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal
+                stretched_image[:, :, 0], device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal, is_onnx=is_onnx
             )
             satellited_image = satellited_image[:, :, np.newaxis]  # Convert back to single channel
 
@@ -907,14 +1013,14 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
             # Extract luminance and process only that channel
             luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
             satellited_luminance = satellite_channel(
-                luminance, device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal
+                luminance, device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal, is_onnx=is_onnx
             )
             satellited_image = merge_luminance(satellited_luminance, cb_channel, cr_channel)
 
         else:  # Full RGB denoising mode
             # Process the 3-channel image directly
             satellited_image = satellite_channel(
-                stretched_image, device, removal_model, detection_model, is_mono=False, progress_signal=progress_signal
+                stretched_image, device, removal_model, detection_model, is_mono=False, progress_signal=progress_signal, is_onnx=is_onnx
             )
 
         # Unstretch if stretched previously
@@ -939,94 +1045,86 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         print(f"Error reading image {image_path}: {e}")
         return None, None, None, None, None, None, None
     
-# Function to satellite a single channel or 3-channel image
-def satellite_channel(image, device, removal_model, detection_model, is_mono=False, progress_signal=None):
+def satellite_channel(image, device, removal_model, detection_model, is_mono=False, progress_signal=None, is_onnx=False):
     """
     Detect satellite trails in chunks and process only the detected chunks.
 
     Args:
         image (numpy.ndarray): Image to process.
-        device (torch.device): Device to run the models on.
-        removal_model (torch.nn.Module): Pre-trained removal model.
-        detection_model (torch.nn.Module): Pre-trained detection model.
+        device (torch.device or str): Device to run the models on.
+        removal_model (torch.nn.Module or ort.InferenceSession): Pre-trained removal model.
+        detection_model (torch.nn.Module or ort.InferenceSession): Pre-trained detection model.
         is_mono (bool): Whether the image is monochrome.
+        is_onnx (bool): Whether to use ONNX Runtime.
 
     Returns:
         numpy.ndarray: Processed image.
     """
-    # Split image into chunks
     chunk_size = 256
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(image, chunk_size=chunk_size, overlap=overlap)
     total_chunks = len(chunks)
     satellited_chunks = []
-    
+
     global GLOBAL_CLIP_TRAIL  # Access the global variable
 
-    # Apply satellite detection and removal models to each chunk
     for idx, (chunk, i, j) in enumerate(chunks):
         original_chunk = chunk.copy()
 
-        # Check for satellite trails in the chunk using the detection model
-        if not contains_trail_with_ai(chunk, detection_model, device):
-            # If no trail is detected, skip processing and add the original chunk
+        # Detection
+        if is_onnx:
+            trail_detected = contains_trail_with_onnx(chunk, detection_model)
+        else:
+            trail_detected = contains_trail_with_ai(chunk, detection_model, device)
+
+        if not trail_detected:
             satellited_chunks.append((chunk, i, j))
             continue
 
         # Prepare the chunk tensor
-        if chunk.ndim == 2:  # Mono chunk
-            chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Triplicate mono to 3 channels
-        elif chunk.shape[-1] == 1:  # Handle grayscale chunks with explicit channel dim
-            chunk_tensor = torch.tensor(chunk.squeeze(-1), dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Triplicate mono to 3 channels
-        else:  # RGB chunk
-            chunk_tensor = torch.tensor(chunk, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
+        if is_onnx:
+            chunk_tensor = prepare_chunk_for_onnx(chunk)
+        else:
+            chunk_tensor = prepare_chunk_for_torch(chunk, device)
 
         # Run the removal model
-        with torch.no_grad():
-            processed_chunk = removal_model(chunk_tensor).squeeze().cpu().numpy()
-
-        # Convert the output back to its original format
-        if chunk.ndim == 2 or chunk.shape[-1] == 1:  # Mono chunk
-            satellited_chunk = processed_chunk[0]  # Use the first output channel
-        else:  # RGB chunk
-            satellited_chunk = processed_chunk.transpose(1, 2, 0)  # Convert back to (H, W, C)
-
-        if GLOBAL_CLIP_TRAIL:
-            # Compute satellite-only image
-            sattrail_only_image = original_chunk - satellited_chunk
-
-            # Clip and scale to isolate the satellite trail
-            mean_val = np.mean(sattrail_only_image)
-            clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
-
-            # Apply a binary mask: values below 0.5 are set to 0, values >= 0.5 are set to 1
-            binary_mask = np.where(clipped_image < 0.1, 0, 1)
-
-            # Subtract the binary mask from the original chunk
-            final_chunk = np.clip(original_chunk - binary_mask, 0, 1)
+        if is_onnx:
+            processed_chunk = run_onnx_removal(chunk_tensor, removal_model, chunk.shape)
         else:
-            final_chunk = satellited_chunk
+            processed_chunk = run_torch_removal(chunk_tensor, removal_model)
+
+        # Handle GLOBAL_CLIP_TRAIL logic
+        final_chunk = apply_clip_trail_logic(processed_chunk, original_chunk) if GLOBAL_CLIP_TRAIL else processed_chunk
 
         satellited_chunks.append((final_chunk, i, j))
-
 
         # Update progress
         progress_percentage = (idx + 1) / total_chunks * 100
         if progress_signal:
-            progress_signal.emit(progress_percentage)  # Emit as a float, not a string
-        QApplication.processEvents()    
+            progress_signal.emit(progress_percentage)
+        QApplication.processEvents()
 
     # Finalize by setting the progress bar to 100%
     if progress_signal:
-        progress_signal.emit(100.0)        
+        progress_signal.emit(100.0)
 
     # Stitch the chunks back together
     satellited_image = stitch_chunks_ignore_border(
         satellited_chunks, image.shape, chunk_size=chunk_size, overlap=overlap
     )
     return satellited_image
+
+
+def contains_trail_with_onnx(chunk, detection_model):
+    resized_chunk = resize(chunk, (256, 256, chunk.shape[2]), mode='reflect', anti_aliasing=True)
+    input_tensor = np.transpose(resized_chunk, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+    output = detection_model.run(None, {detection_model.get_inputs()[0].name: input_tensor})[0]
+    return output[0] > 0.5  # Return True if trail is detected
+
+def run_onnx_removal(chunk_tensor, removal_model, original_shape):
+    output = removal_model.run(None, {removal_model.get_inputs()[0].name: chunk_tensor})[0]
+    processed_chunk = np.transpose(output.squeeze(0), (1, 2, 0))
+    return resize(processed_chunk, original_shape, mode='reflect', anti_aliasing=True)
 
 
 
@@ -1054,6 +1152,37 @@ def contains_trail_with_ai(chunk, detection_model, device):
         output = detection_model(input_tensor).item()
 
     return output > 0.5  # Return True if trail is detected (output > 0.5)
+
+def run_torch_removal(chunk_tensor, removal_model):
+    with torch.no_grad():
+        processed_chunk = removal_model(chunk_tensor).squeeze().cpu().numpy()
+
+    if chunk_tensor.ndim == 4:  # RGB chunk
+        return processed_chunk.transpose(1, 2, 0)
+    elif chunk_tensor.ndim == 3:  # Mono chunk
+        return processed_chunk[0]
+
+def prepare_chunk_for_torch(chunk, device):
+    if chunk.ndim == 2:  # Mono chunk
+        chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        return chunk_tensor.repeat(1, 3, 1, 1)  # Convert mono to 3 channels
+    elif chunk.shape[-1] == 1:  # Grayscale
+        chunk_tensor = torch.tensor(chunk.squeeze(-1), dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        return chunk_tensor.repeat(1, 3, 1, 1)  # Convert mono to 3 channels
+    else:  # RGB chunk
+        return torch.tensor(chunk, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
+
+def prepare_chunk_for_onnx(chunk):
+    resized_chunk = resize(chunk, (256, 256, chunk.shape[2]), mode='reflect', anti_aliasing=True)
+    return np.transpose(resized_chunk, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+
+def apply_clip_trail_logic(processed_chunk, original_chunk):
+    sattrail_only_image = original_chunk - processed_chunk
+    mean_val = np.mean(sattrail_only_image)
+    clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
+    binary_mask = np.where(clipped_image < 0.25, 0, 1)
+    return np.clip(original_chunk - binary_mask, 0, 1)
+
 
 def save_processed_image(image, output_path, file_extension, bit_depth, original_header=None, is_mono=False, file_meta=None, image_meta=None):
     """Save the processed image to the appropriate format."""
@@ -1189,6 +1318,7 @@ class BatchProcessor(QThread):
         self.output_dir = output_dir
         self.models = models
         self.satellite_mode = satellite_mode
+        self.is_onnx = models.get("is_onnx",False)
 
     def run(self):
         try:
@@ -1220,7 +1350,8 @@ class BatchProcessor(QThread):
                         self.models["removal_model"],
                         self.satellite_mode,
                         log_signal=self.log_signal,
-                        progress_signal=self.progress_signal  # Pass chunk-level progress
+                        progress_signal=self.progress_signal,  # Pass chunk-level progress
+                        is_onnx=self.is_onnx
                     )
 
                     if satellited_image is not None:
