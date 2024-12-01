@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity11.23.2024_1.zip" sha1="724f91d6d5ee84213a2650dae6258324f6cf78a7" type="script" releaseDate="20241123">
+      <package fileName="SetiAstroCosmicClarity12.01.2024.zip" sha1="a50b589e6ff5361b3e9aecf2dbf90c7a9e413b5b" type="script" releaseDate="20241201">
          <title>
-        Cosmic Clarity - Satellite Removal Tool V1.0
+        Cosmic Clarity Satellite Removal V1.2
       </title>
          <description>
             <p>
-Script for PI to interface with Seti Astro Comsic Clarity Satellite Removal Tool.  From PI you can have it process the current image, or trigger a batch process.  If you choose to run it on the single image, it will save a temp of the image in the background, run the Satellite Removal Tool, and then import the image back into PI while deleting the temp images.  You will also have to have Cosmic Clarity already installed.  Please visit www.setiastro.com/cosmicclarity for more information.
+Added support for Clipping Satellite Trail to 0 option.  You will need to get the latest Cosmic Clarity Suite with Satellite Remover V1.2.1 to use this functionality from PixInsight
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-11-23T19:14:30.411Z" encoding="Base64">c36Xd9sNd6bfO7dvKNNHhmV4wLk1rxl59SdfdCrue9VhOr4Y6lc+es72w1ETbtZRJ48uV2kPnlXA3lj1/6yMAQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-12-01T16:39:42.066Z" encoding="Base64">tNbZ2lxy8XoQB26x99NejwE1kFVJUbJF2uJ3rdl1wtz4tOqcYEyzwdjk/c6LPsjOA2cCHeSFDSxNDOp1aTb9Bw==</Signature>
