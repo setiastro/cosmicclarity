@@ -467,7 +467,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.2")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.2.1")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -1312,13 +1312,14 @@ class BatchProcessor(QThread):
     log_signal = pyqtSignal(str)
     processing_complete = pyqtSignal()
 
-    def __init__(self, input_dir, output_dir, models, satellite_mode):
+    def __init__(self, input_dir, output_dir, models, satellite_mode, clip_trail):
         super().__init__()
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.models = models
         self.satellite_mode = satellite_mode
         self.is_onnx = models.get("is_onnx",False)
+        self.clip_trail = clip_trail
 
     def run(self):
         try:
@@ -1470,7 +1471,8 @@ if __name__ == "__main__":
                     input_dir=input_dir,
                     output_dir=output_dir,
                     models=models,
-                    satellite_mode=satellite_mode
+                    satellite_mode=satellite_mode,
+                    clip_trail=GLOBAL_CLIP_TRAIL
                 )
                 batch_processor.log_signal.connect(log_message)
                 batch_processor.progress_signal.connect(update_progress)
@@ -1481,7 +1483,7 @@ if __name__ == "__main__":
 
             elif args.monitor:
                 print("Starting live folder monitoring...")
-                folder_monitor = FolderMonitor(input_dir, output_dir, models, satellite_mode)
+                folder_monitor = FolderMonitor(input_dir, output_dir, models, satellite_mode, clip_trail=GLOBAL_CLIP_TRAIL)
                 folder_monitor.log_signal.connect(lambda msg: print(f"[LOG]: {msg}"))
                 folder_monitor.run()
             else:
