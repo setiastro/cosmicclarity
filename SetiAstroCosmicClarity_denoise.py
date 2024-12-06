@@ -19,6 +19,8 @@ from tkinter import ttk
 import argparse  # For command-line argument parsing
 import onnxruntime as ort
 
+
+
 #torch.cuda.is_available = lambda: False
 
 # Suppress model loading warnings
@@ -155,9 +157,14 @@ def load_models(exe_dir, use_gpu=True):
         device = torch.device("cuda")
 
         denoise_model = DenoiseCNN().to(device)
-        denoise_model.load_state_dict(
-            torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
-        )
+
+        # Load only the model state dict
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
+        if "model_state_dict" in checkpoint:
+            denoise_model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            denoise_model.load_state_dict(checkpoint)  # Assume it's just the state dict
+
         denoise_model.eval()
 
         cached_models = {
@@ -190,9 +197,14 @@ def load_models(exe_dir, use_gpu=True):
         device = torch.device("cpu")
 
         denoise_model = DenoiseCNN().to(device)
-        denoise_model.load_state_dict(
-            torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
-        )
+
+        # Load only the model state dict
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
+        if "model_state_dict" in checkpoint:
+            denoise_model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            denoise_model.load_state_dict(checkpoint)  # Assume it's just the state dict
+
         denoise_model.eval()
 
         cached_models = {
@@ -201,6 +213,7 @@ def load_models(exe_dir, use_gpu=True):
             "is_onnx": False,
         }
         return cached_models
+
 
 # Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
 def extract_luminance(image):
@@ -377,69 +390,90 @@ def replace_border(original_image, processed_image, border_size=16):
     
     return processed_image
 
-import numpy as np
+
 
 # Function to stretch an image
 def stretch_image(image):
     """
-    Perform a linear stretch on the image.
+    Perform a linear stretch on the image with unlinked channels for all images.
     """
     original_min = np.min(image)
     stretched_image = image - original_min  # Shift image so that the min is 0
-    original_median = np.median(stretched_image, axis=(0, 1)) if image.ndim == 3 else np.median(stretched_image)
 
+    # Capture the original medians before any further processing
+    original_medians = []
+    for c in range(3):  # Assume 3-channel input
+        channel_median = np.median(stretched_image[..., c])
+        original_medians.append(channel_median)
 
-
+    # Define the target median for stretching
     target_median = 0.25
-    if image.ndim == 3:  # RGB image case
-        # Calculate the overall median for color images as in original code
-        median_color = np.mean(np.median(stretched_image, axis=(0, 1)))
-        stretched_image = ((median_color - 1) * target_median * stretched_image) / (
-            median_color * (target_median + stretched_image - 1) - target_median * stretched_image)
-        stretched_medians = np.median(stretched_image, axis=(0, 1))
-    else:  # Grayscale image case
-        image_median = np.median(stretched_image)
-        stretched_image = ((image_median - 1) * target_median * stretched_image) / (
-            image_median * (target_median + stretched_image - 1) - target_median * stretched_image)
-        stretched_medians = np.median(stretched_image)
+
+    # Apply the stretch for each channel
+    for c in range(3):
+        channel_median = original_medians[c]
+        if channel_median != 0:
+            stretched_image[..., c] = ((channel_median - 1) * target_median * stretched_image[..., c]) / (
+                channel_median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+            )
+
+    # Clip stretched image to [0, 1] range
+    stretched_image = np.clip(stretched_image, 0, 1)
+
+    # Return the stretched image, original min, and original medians
+    return stretched_image, original_min, original_medians
 
 
 
-    stretched_image = np.clip(stretched_image, 0, 1)  # Clip to [0, 1] range
-
-    return stretched_image, original_min, original_median
-
-# Function to unstretch an image with final median adjustment
-def unstretch_image(image, original_median, original_min):
+# Function to unstretch an image
+def unstretch_image(image, original_medians, original_min):
     """
-    Undo the stretch to return the image to the original linear state.
+    Undo the stretch to return the image to the original linear state with unlinked channels.
+    Handles both single-channel and 3-channel images.
     """
-    if image.ndim == 3:  # RGB image case
-        # Use the overall median to revert the stretch for color images
-        median_color = np.mean(np.median(image, axis=(0, 1)))
-        unstretched_image = ((median_color - 1) * original_median * image) / (
-            median_color * (original_median + image - 1) - original_median * image)
-        final_medians = np.median(unstretched_image, axis=(0, 1))
-
-        # Adjust each channel to match the original median
-        #for c in range(3):  # R, G, B channels
-        #    unstretched_image[..., c] *= original_median[c] / final_medians[c]
-        #adjusted_medians = np.median(unstretched_image, axis=(0, 1))
-    else:  # Grayscale image case
-        image_median = np.median(image)
-        unstretched_image = ((image_median - 1) * original_median * image) / (
-            image_median * (original_median + image - 1) - original_median * image)
-        final_medians = np.median(unstretched_image)
-
-        # Adjust for grayscale case
-        #unstretched_image *= original_median / final_medians
-        #adjusted_medians = np.median(unstretched_image)
+    was_single_channel = False  # Local flag to check if the image was originally mono
 
 
-    unstretched_image += original_min  # Add back the original minimum
-    unstretched_image = np.clip(unstretched_image, 0, 1)  # Clip to [0, 1] range
 
-    return unstretched_image
+    # Check if the image is single-channel
+    if image.ndim == 3 and image.shape[2] == 1:
+        was_single_channel = True  # Mark the image as originally single-channel
+        image = np.repeat(image, 3, axis=2)  # Convert to 3-channel by duplicating
+
+    elif image.ndim == 2:  # True single-channel case
+        was_single_channel = True
+        image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+    # Process each channel independently
+    for c in range(3):  # Assume 3-channel input at this point
+        channel_median = np.median(image[..., c])
+        if channel_median != 0 and original_medians[c] != 0:
+
+            image[..., c] = ((channel_median - 1) * original_medians[c] * image[..., c]) / (
+                channel_median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+            )
+
+        else:
+            print(f"Channel {c} - Skipping unstretch due to zero median.")
+
+    image += original_min  # Add back the original minimum
+    image = np.clip(image, 0, 1)  # Clip to [0, 1] range
+
+    # If the image was originally single-channel, convert back to single-channel
+    if was_single_channel:
+        image = np.mean(image, axis=2, keepdims=True)  # Convert back to single-channel
+
+
+
+    return image
+
+
+
+
+
+
+
+
 
 
 # Function to add a border of median value around the image
@@ -477,13 +511,14 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
     file_extension = os.path.splitext(image_path)[1].lower()
     if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
         print(f"Ignoring non-image file: {image_path}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     original_header = None
     image = None
     bit_depth = "32-bit float"  # Default bit depth
     is_mono = False
     file_meta, image_meta = None, None
+    stretch_needed = None
 
     try:
         # Load the image based on its extension
@@ -520,18 +555,17 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 if image_data.dtype.byteorder not in ('=', '|'):  # Check if byte order is non-native
                     image_data = image_data.astype(image_data.dtype.newbyteorder('='))  # Convert to native byte order
 
-
                 # Determine the bit depth based on the data type in the FITS file
                 if image_data.dtype == np.uint16:
                     bit_depth = "16-bit"
-                    print("Identified 16-bit FITS image.")
+                    print("Identified 16bit FITS image.")
                 elif image_data.dtype == np.float32:
                     bit_depth = "32-bit floating point"
-                    print("Identified 32-bit floating point FITS image.")
+                    print("Identified 32bit floating point FITS image.")
                 elif image_data.dtype == np.uint32:
                     bit_depth = "32-bit unsigned"
-                    print("Identified 32-bit unsigned FITS image.")
-
+                    print("Identified 32bit unsigned FITS image.")
+                
                 # Handle 3D FITS data (e.g., RGB or multi-layered data)
                 if image_data.ndim == 3 and image_data.shape[0] == 3:
                     image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
@@ -576,6 +610,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                         image = (image - image_min) / (image_max - image_min)
                         print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
 
+
+
+
                     elif bit_depth == "32-bit floating point":
                         image = image_data  # No normalization needed for 32-bit float
                     is_mono = True
@@ -583,14 +620,14 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                 else:
                     raise ValueError("Unsupported FITS format!")
 
+
         # Check if file extension is '.xisf'
         elif file_extension == '.xisf':
             # Load XISF file
             xisf = XISF(image_path)
             image = xisf.read_image(0)  # Assuming the image data is in the first image block
-            original_header = xisf.get_images_metadata()[0]  # Load metadata for header reconstruction
-            file_meta = xisf.get_file_metadata()  # For potential use if saving with the same meta
-            image_meta = xisf.get_images_metadata()[0]
+            image_meta = xisf.get_images_metadata()  # List of metadata blocks for each image
+            file_meta = xisf.get_file_metadata()  # File-level metadata
 
             # Determine bit depth
             if image.dtype == np.uint16:
@@ -622,15 +659,19 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
 
         # Add a border around the image with the median value
         image_with_border = add_border(image, border_size=16)
-
+        
         # Check if the image needs stretching based on its median value
-        stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.08
-        original_median = np.median(image_with_border)
+        stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.05
+
         if stretch_needed:
-            stretched_image, original_min, original_median = stretch_image(image_with_border)
+            # Stretch the image
+            stretched_image, original_min, original_medians = stretch_image(image_with_border)
         else:
+            # If no stretch is needed, use the original image directly
             stretched_image = image_with_border
-            original_min = None
+            original_min = np.min(image_with_border)
+            original_medians = [np.median(image_with_border[..., c]) for c in range(3)] if image_with_border.ndim == 3 else [np.median(image_with_border)]
+
 
         # Process mono or color images
         if is_mono:
@@ -671,18 +712,20 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                     blend_images(stretched_image[:, :, 2], denoised_b, denoise_strength)
                 ], axis=-1)
 
-        # Unstretch if stretched previously
+        # Unstretch the image
         if stretch_needed:
-            denoised_image = unstretch_image(denoised_image, original_median, original_min)
+            denoised_image = unstretch_image(denoised_image, original_medians, original_min)
+
 
         # Remove the border added around the image
+        
         denoised_image = remove_border(denoised_image, border_size=16)
-
-        return denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta
+        
+        return denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     
 # Function to denoise a single channel
 def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
@@ -745,7 +788,9 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
         show_progress(idx + 1, len(chunks))
 
     # Stitch the chunks back together
+    
     denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
+    
     return denoised_channel
 
 
@@ -759,7 +804,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V5.6                       # 
+ *#              Cosmic Clarity - Denoise V6                         # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -784,7 +829,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
-        denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta = denoise_image(
+        denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta = denoise_image(
             image_path, 
             denoise_strength, 
             models['device'], 
@@ -874,19 +919,44 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
 
             elif file_extension == '.xisf':
                 try:
-                    # If the image is mono, we replicate the single channel into RGB format for consistency
-                    if is_mono:
-                        rgb_image = np.stack([denoised_image[:, :, 0]] * 3, axis=-1).astype(np.float32)
-                    else:
-                        rgb_image = denoised_image.astype(np.float32)
-                    
-                    # Save the denoised image in XISF format using the XISF write method, including metadata if available
-                    XISF.write(output_image_path, rgb_image, xisf_metadata=file_meta)  # Replace `original_header` with the appropriate metadata if it's named differently
+                    # Debug: Print original image details
+                    print(f"Original image shape: {denoised_image.shape}, dtype: {denoised_image.dtype}")
+                    print(f"Bit depth: {bit_depth}")
 
+                    # Adjust bit depth
+                    if bit_depth == "16-bit":
+                        processed_image = (denoised_image * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        processed_image = (denoised_image * 4294967295).astype(np.uint32)
+                    else:  # Default to 32-bit float
+                        processed_image = denoised_image.astype(np.float32)
+
+                    # Adjust for mono images
+                    if is_mono:
+                        print("Preparing mono image...")
+                        processed_image = processed_image[:, :, 0]  # Take the first channel
+                        processed_image = processed_image[:, :, np.newaxis]  # Add back channel dimension
+                        image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], 1)
+                        image_meta[0]['colorSpace'] = 'Gray'  # Update metadata for mono
+
+                    # Debug: Print processed image details
+                    print(f"Processed image shape: {processed_image.shape}, dtype: {processed_image.dtype}")
+
+                    # Save the image
+                    XISF.write(
+                        output_image_path,                  # Correct output path
+                        processed_image,                   # Final processed image
+                        creator_app="Seti Astro Cosmic Clarity",
+                        image_metadata=image_meta[0],      # First block of image metadata
+                        xisf_metadata=file_meta,           # File-level metadata
+                        codec='lz4hc',
+                        shuffle=True
+                    )
                     print(f"Saved {bit_depth} XISF denoised image to: {output_image_path}")
-                    
+
                 except Exception as e:
                     print(f"Error saving XISF file: {e}")
+
 
 
 
