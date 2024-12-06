@@ -622,13 +622,13 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                 is_mono = True
                 print(f"Loaded image bit depth: {bit_depth}")
 
+        # Check if file extension is '.xisf'
         elif file_extension == 'xisf':
             # Load XISF file
             xisf = XISF(image_path)
             image = xisf.read_image(0)  # Assuming the image data is in the first image block
-            original_header = xisf.get_images_metadata()[0]  # Load metadata for header reconstruction
-            file_meta = xisf.get_file_metadata()  # For potential use if saving with the same meta
-            image_meta = xisf.get_images_metadata()[0]
+            image_meta = xisf.get_images_metadata()  # List of metadata blocks for each image
+            file_meta = xisf.get_file_metadata()  # File-level metadata
 
             # Determine bit depth
             if image.dtype == np.uint16:
@@ -729,7 +729,7 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 
     # Add a border around the image with the median value
@@ -809,11 +809,14 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
 
             print("")
             stellar_sharpened_luminance = stitch_chunks_ignore_border(stellar_sharpened_chunks, luminance.shape, chunk_size=256, overlap=64)
+            print(f"Stellar sharpening complete. Shape: {stellar_sharpened_luminance.shape}")
 
             if sharpening_mode == "Stellar Only":
                 sharpened_luminance = stellar_sharpened_luminance
             else:
-                luminance = stellar_sharpened_luminance  # Pass to non-stellar sharpening
+                print("Updating luminance for non-stellar sharpening...")
+                chunks = split_image_into_chunks_with_overlap(stellar_sharpened_luminance, chunk_size=256, overlap=64)  # Update luminance for non-stellar sharpening
+
 
         # Non-stellar sharpening and blending with `nonstellar_amount`
         nonstellar_sharpened_chunks = []
@@ -1075,7 +1078,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Sharpen V5.6                       # 
+ *#              Cosmic Clarity Suite - Sharpen V6                   # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -1157,20 +1160,64 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                     
                 print(f"Saved {actual_bit_depth} sharpened image to: {output_image_path}")
 
-            elif file_extension in ['.xisf']:
+            elif file_extension == '.xisf':
                 try:
-                    # If mono, replicate the single channel into RGB for consistency
-                    if is_mono:
-                        rgb_image = np.stack([sharpened_image[:, :, 0]] * 3, axis=-1).astype(np.float32)
-                    else:
-                        rgb_image = sharpened_image.astype(np.float32)
+                    # Debug: Print details about the sharpened image
+                    print(f"Sharpened image shape: {sharpened_image.shape}, dtype: {sharpened_image.dtype}")
+                    print(f"Bit depth: {bit_depth}")
 
-                    # Use the XISF write method to save the RGB image or original sharpened image
-                    XISF.write(output_image_path, rgb_image, xisf_metadata=file_meta)
+                    # Adjust bit depth for saving
+                    if bit_depth == "16-bit":
+                        processed_image = (sharpened_image * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        processed_image = (sharpened_image * 4294967295).astype(np.uint32)
+                    else:  # Default to 32-bit float
+                        processed_image = sharpened_image.astype(np.float32)
+
+                    # Handle mono images
+                    if is_mono:
+                        print("Preparing mono image for XISF...")
+                        processed_image = processed_image[:, :, 0]  # Extract single channel
+                        processed_image = processed_image[:, :, np.newaxis]  # Add back channel dimension
+                        if image_meta and isinstance(image_meta, list):
+                            image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], 1)
+                            image_meta[0]['colorSpace'] = 'Gray'  # Update metadata for mono images
+                        else:
+                            # Create default metadata for mono
+                            image_meta = [{
+                                'geometry': (processed_image.shape[1], processed_image.shape[0], 1),
+                                'colorSpace': 'Gray'
+                            }]
+
+                    # Fallback for `image_meta` if not provided
+                    if image_meta is None or not isinstance(image_meta, list):
+                        image_meta = [{
+                            'geometry': (processed_image.shape[1], processed_image.shape[0], processed_image.shape[2]),
+                            'colorSpace': 'RGB' if not is_mono else 'Gray'
+                        }]
+
+                    # Fallback for `file_meta`
+                    if file_meta is None:
+                        file_meta = {}  # Ensure file_meta is a valid dictionary
+
+                    # Debug: Print processed image details
+                    print(f"Processed image shape for XISF: {processed_image.shape}, dtype: {processed_image.dtype}")
+
+                    # Save the image
+                    XISF.write(
+                        output_image_path,                   # Output path
+                        processed_image,                    # Final processed image
+                        creator_app="Seti Astro Cosmic Clarity",
+                        image_metadata=image_meta[0],       # First block of image metadata
+                        xisf_metadata=file_meta,            # File-level metadata
+                        codec='lz4hc',
+                        shuffle=True
+                    )
                     print(f"Saved {bit_depth} XISF sharpened image to: {output_image_path}")
 
                 except Exception as e:
                     print(f"Error saving XISF file: {e}")
+
                             
 
             else:
