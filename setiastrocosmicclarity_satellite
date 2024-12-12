@@ -481,7 +481,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.3")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.3.1")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -759,57 +759,78 @@ def replace_border(original_image, processed_image, border_size=16):
 # Function to stretch an image
 def stretch_image(image):
     """
-    Perform a linear stretch on the image with unlinked channels for RGB images.
+    Perform a linear stretch on the image with unlinked channels for all images.
     """
     original_min = np.min(image)
-    shifted_image = image - original_min  # Shift image so that the min is 0
+    stretched_image = image - original_min  # Shift image so that the min is 0
+
+    # Capture the original medians before any further processing
+    original_medians = []
+    for c in range(3):  # Assume 3-channel input
+        channel_median = np.median(stretched_image[..., c])
+        original_medians.append(channel_median)
+
+    # Define the target median for stretching
     target_median = 0.25
 
-    if image.ndim == 3:  # RGB image case
-        original_medians = [np.median(shifted_image[..., c]) for c in range(3)]  # Get original medians
-        for c in range(3):  # Process each channel independently
-            channel_median = original_medians[c]
-            shifted_image[..., c] = ((channel_median - 1) * target_median * shifted_image[..., c]) / (
-                channel_median * (target_median + shifted_image[..., c] - 1) - target_median * shifted_image[..., c])
-    else:  # Grayscale image case
-        original_median = np.median(shifted_image)  # Get original median
-        shifted_image = ((original_median - 1) * target_median * shifted_image) / (
-            original_median * (target_median + shifted_image - 1) - target_median * shifted_image)
-        original_medians = original_median
+    # Apply the stretch for each channel
+    for c in range(3):
+        channel_median = original_medians[c]
+        if channel_median != 0:
+            stretched_image[..., c] = ((channel_median - 1) * target_median * stretched_image[..., c]) / (
+                channel_median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+            )
 
-    stretched_image = np.clip(shifted_image, 0, 1)  # Clip to [0, 1] range
+    # Clip stretched image to [0, 1] range
+    stretched_image = np.clip(stretched_image, 0, 1)
 
+    # Return the stretched image, original min, and original medians
     return stretched_image, original_min, original_medians
 
 
-def unstretch_image(image, original_median, original_min, is_mono):
+
+# Function to unstretch an image
+def unstretch_image(image, original_medians, original_min):
     """
-    Undo the stretch to return the image to the original linear state with unlinked channels for RGB images.
+    Undo the stretch to return the image to the original linear state with unlinked channels.
+    Handles both single-channel and 3-channel images.
     """
-    if is_mono:
-        # Ensure original_median is a scalar for mono images
-        if isinstance(original_median, (list, tuple, np.ndarray)):
-            original_median = original_median[0]  # Take the first value as the scalar
-        image_median = np.median(image)
-        if image_median == 0 or original_median == 0:
-            print("Warning: Zero median detected, skipping unstretch.")
-            return image  # Return unaltered image to avoid division by zero
-        image = ((image_median - 1) * original_median * image) / (
-            image_median * (original_median + image - 1) - original_median * image)
-    else:
-        # Handle RGB images (list of medians for each channel)
-        for c in range(3):  # Process each channel independently
-            channel_median = np.median(image[..., c])
-            if channel_median == 0 or original_median[c] == 0:
-                print(f"Warning: Zero median detected in channel {c}, skipping unstretch for this channel.")
-                continue
-            image[..., c] = ((channel_median - 1) * original_median[c] * image[..., c]) / (
-                channel_median * (original_median[c] + image[..., c] - 1) - original_median[c] * image[..., c])
+    was_single_channel = False  # Local flag to check if the image was originally mono
+
+
+
+    # Check if the image is single-channel
+    if image.ndim == 3 and image.shape[2] == 1:
+        was_single_channel = True  # Mark the image as originally single-channel
+        image = np.repeat(image, 3, axis=2)  # Convert to 3-channel by duplicating
+
+    elif image.ndim == 2:  # True single-channel case
+        was_single_channel = True
+        image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+    # Process each channel independently
+    for c in range(3):  # Assume 3-channel input at this point
+        channel_median = np.median(image[..., c])
+        if channel_median != 0 and original_medians[c] != 0:
+
+            image[..., c] = ((channel_median - 1) * original_medians[c] * image[..., c]) / (
+                channel_median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+            )
+
+        else:
+            print(f"Channel {c} - Skipping unstretch due to zero median.")
 
     image += original_min  # Add back the original minimum
     image = np.clip(image, 0, 1)  # Clip to [0, 1] range
 
+    # If the image was originally single-channel, convert back to single-channel
+    if was_single_channel:
+        image = np.mean(image, axis=2, keepdims=True)  # Convert back to single-channel
+
+
+
     return image
+
 
 
 # Function to add a border of median value around the image
@@ -1025,25 +1046,13 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         #check if stretch is needed
         stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.05
         if stretch_needed:
-            if is_mono:
-                # Mono image: perform a single stretch
-                stretched_image, original_min, original_median = stretch_image(image_with_border)
-            else:
-                # Color image: perform unlinked stretch
-                stretched_channels = []
-                original_medians = []
-                original_mins = []
-                for c in range(3):  # Process each channel separately
-                    stretched_channel, channel_min, channel_median = stretch_image(image_with_border[:, :, c])
-                    stretched_channels.append(stretched_channel)
-                    original_mins.append(channel_min)
-                    original_medians.append(channel_median)
-                # Combine stretched channels into an RGB image
-                stretched_image = np.stack(stretched_channels, axis=-1)
+            # Stretch the image
+            stretched_image, original_min, original_medians = stretch_image(image_with_border)
         else:
+            # If no stretch is needed, use the original image directly
             stretched_image = image_with_border
-            original_min = None
-            original_median = None
+            original_min = np.min(image_with_border)
+            original_medians = [np.median(image_with_border[..., c]) for c in range(3)] if image_with_border.ndim == 3 else [np.median(image_with_border)]
 
         
 
@@ -1078,24 +1087,9 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
             log_message(f"No satellite trail detected in {image_path}. Proceeding with unmodified image.")
             satellited_image = stretched_image  # Use the stretched (or original) image as the output  
 
-        # Unstretch if stretched previously
+        # Unstretch the image
         if stretch_needed:
-            
-            if is_mono:
-                # Mono image: perform a single unstretch
-                satellited_image = unstretch_image(satellited_image, original_median, original_min, is_mono=True)
-            else:
-                # Color image: perform unlinked unstretch
-                unstretched_channels = []
-                for c in range(3):  # Process each channel separately
-                    unstretched_channel = unstretch_image(
-                        satellited_image[:, :, c], original_medians[c], original_mins[c], is_mono=False
-                    )
-                    unstretched_channels.append(unstretched_channel)
-                # Combine unstretched channels into an RGB image
-                satellited_image = np.stack(unstretched_channels, axis=-1)
-        else:
-            satellited_image = satellited_image        
+            satellited_image = unstretch_image(satellited_image, original_medians, original_min)       
 
         # If GLOBAL_CLIP_TRAIL is True, set pixels with the minimum value to 0
         if GLOBAL_CLIP_TRAIL:
