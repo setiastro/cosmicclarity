@@ -402,7 +402,7 @@ class FolderMonitor(QThread):
         self.log_message("Live monitoring started...")
         self.processed_files = set([
             f for f in os.listdir(self.input_dir)
-            if f.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf'))
+            if f.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef'))
         ])
 
         while self.running:
@@ -410,7 +410,7 @@ class FolderMonitor(QThread):
                 # List all eligible files in the input directory
                 files = [
                     f for f in os.listdir(self.input_dir)
-                    if f.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf'))
+                    if f.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef'))
                 ]
                 # Filter for files that haven't been processed yet
                 new_files = [f for f in files if f not in self.processed_files]
