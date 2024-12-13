@@ -33,6 +33,8 @@ import torch.sparse
 import torch._C
 import onnxruntime as ort
 
+import rawpy
+
 #torch.cuda.is_available = lambda: False
 
 # Custom Imports
@@ -481,7 +483,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.3.1")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -886,7 +888,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
-    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
         print(f"Ignoring non-image file: {image_path}")
         return None, None, None, None, None, None, None, None
 
@@ -1027,6 +1029,65 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
             print(f"Loaded XISF image with bit depth: {bit_depth}, Mono: {is_mono}")
 
+        elif file_extension in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
+            try:
+                with rawpy.imread(image_path) as raw:
+                    # Get the raw Bayer data
+                    bayer_image = raw.raw_image_visible.astype(np.float32)
+                    print(f"Raw Bayer image dtype: {bayer_image.dtype}, min: {bayer_image.min()}, max: {bayer_image.max()}")
+
+                    # Normalize Bayer data to [0, 1]
+                    bayer_image /= bayer_image.max()
+                    print(f"Normalized Bayer image min: {bayer_image.min()}, max: {bayer_image.max()}")
+
+                    # Convert Bayer data to a 3D array (for consistency with your pipeline)
+                    image = np.stack([bayer_image] * 3, axis=-1)
+                    bit_depth = "16-bit"  # Assuming 16-bit raw data
+                    is_mono = True
+
+                    # Populate `original_header` with RAW metadata
+                    original_header_dict = {
+                        'CAMERA': raw.camera_whitebalance[0] if raw.camera_whitebalance else 'Unknown',
+                        'EXPTIME': raw.shutter if hasattr(raw, 'shutter') else 0.0,
+                        'ISO': raw.iso_speed if hasattr(raw, 'iso_speed') else 0,
+                        'FOCAL': raw.focal_len if hasattr(raw, 'focal_len') else 0.0,
+                        'DATE': raw.timestamp if hasattr(raw, 'timestamp') else 'Unknown',
+                    }
+
+                    # Extract CFA pattern
+                    cfa_pattern = raw.raw_colors_visible
+                    cfa_mapping = {
+                        0: 'R',  # Red
+                        1: 'G',  # Green
+                        2: 'B',  # Blue
+                    }
+                    cfa_description = ''.join([cfa_mapping.get(color, '?') for color in cfa_pattern.flatten()[:4]])
+
+                    # Add CFA pattern to header
+                    original_header_dict['CFA'] = (cfa_description, 'Color Filter Array pattern')
+
+                    # Convert original_header_dict to fits.Header
+                    original_header = fits.Header()
+                    for key, value in original_header_dict.items():
+                        original_header[key] = value
+
+                    # Debug save: Save the raw Bayer matrix with CFA info
+                    debug_output_path = os.path.join(os.path.dirname(image_path), "debug_bayer_image.fits")
+                    save_processed_image(
+                        image=image,
+                        output_path=debug_output_path,
+                        file_extension='.fits',
+                        bit_depth=bit_depth,
+                        original_header=original_header,
+                        is_mono=is_mono
+                    )
+                    print(f"Debug Bayer image saved successfully with CFA pattern: {cfa_description}")
+
+            except Exception as e:
+                print(f"Error reading RAW file: {image_path}, {e}")
+                return None, None, None, None, None, None, None, None
+        
+
 
         else:  # Assume 8-bit PNG
             image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
@@ -1045,7 +1106,9 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
         #check if stretch is needed
         stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.05
+        
         if stretch_needed:
+            print(f"Normalizing Linear Data")
             # Stretch the image
             stretched_image, original_min, original_medians = stretch_image(image_with_border)
         else:
@@ -1089,6 +1152,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
         # Unstretch the image
         if stretch_needed:
+            print(f"De-normalizing linear data")
             satellited_image = unstretch_image(satellited_image, original_medians, original_min)       
 
         # If GLOBAL_CLIP_TRAIL is True, set pixels with the minimum value to 0
@@ -1338,6 +1402,63 @@ def save_processed_image(image, output_path, file_extension, bit_depth, original
         except Exception as e:
             print(f"Error saving XISF file: {e}")
 
+    elif file_extension in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
+        print("RAW formats are not writable. Saving as FITS instead.")
+        output_path = output_path.rsplit('.', 1)[0] + ".fits"
+
+        # Save as FITS file with metadata
+        if original_header is not None:
+            # Convert original_header (dictionary) to astropy Header object
+            fits_header = fits.Header()
+            for key, value in original_header.items():
+                fits_header[key] = value
+            fits_header['BSCALE'] = 1.0  # Scaling factor
+            fits_header['BZERO'] = 0.0   # Offset for brightness    
+
+            if is_mono:  # Grayscale FITS
+                if bit_depth == "16-bit":
+                    satellited_image_fits = (image[:, :, 0] * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = fits_header.get('BZERO', 0)
+                    bscale = fits_header.get('BSCALE', 1)
+                    satellited_image_fits = (image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+                else:  # 32-bit float
+                    satellited_image_fits = image[:, :, 0].astype(np.float32)
+
+                # Update header for a 2D (grayscale) image
+                fits_header['NAXIS'] = 2
+                fits_header['NAXIS1'] = image.shape[1]  # Width
+                fits_header['NAXIS2'] = image.shape[0]  # Height
+                fits_header.pop('NAXIS3', None)  # Remove if present
+
+                hdu = fits.PrimaryHDU(satellited_image_fits, header=fits_header)
+            else:  # RGB FITS
+                satellited_image_transposed = np.transpose(image, (2, 0, 1))  # Channels, Height, Width
+                if bit_depth == "16-bit":
+                    satellited_image_fits = (satellited_image_transposed * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = fits_header.get('BZERO', 0)
+                    bscale = fits_header.get('BSCALE', 1)
+                    satellited_image_fits = satellited_image_transposed.astype(np.float32) * bscale + bzero
+                    fits_header['BITPIX'] = -32
+                else:  # Default to 32-bit float
+                    satellited_image_fits = satellited_image_transposed.astype(np.float32)
+
+                # Update header for a 3D (RGB) image
+                fits_header['NAXIS'] = 3
+                fits_header['NAXIS1'] = satellited_image_transposed.shape[2]  # Width
+                fits_header['NAXIS2'] = satellited_image_transposed.shape[1]  # Height
+                fits_header['NAXIS3'] = satellited_image_transposed.shape[0]  # Channels
+
+                hdu = fits.PrimaryHDU(satellited_image_fits, header=fits_header)
+
+            # Write the FITS file
+            try:
+                hdu.writeto(output_path, overwrite=True)
+                print(f"RAW processed and saved as FITS to: {output_path}")
+            except Exception as e:
+                print(f"Error saving FITS file: {e}")
+
 
 
     else:
@@ -1384,7 +1505,7 @@ class BatchProcessor(QThread):
 
             files = [
                 f for f in os.listdir(self.input_dir)
-                if f.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf'))
+                if f.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef'))
             ]
             total_files = len(files)
 
