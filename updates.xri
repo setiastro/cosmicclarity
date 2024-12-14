@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity12.12.2024.zip" sha1="c0c9518190bee1e3f8b6e6f53c2900b30d0326de" type="script" releaseDate="20241212">
+      <package fileName="SetiAstroCosmicClarity12.14.2024.zip" sha1="1b2872403a2790214f48036254ecee5b89299d66" type="script" releaseDate="20241214">
          <title>
-        Cosmic Clarity Satellite V1.3
+        Cosmic Clarity Sharpen and Denoise
       </title>
          <description>
             <p>
-Updated to fix the issue in selecting Batch Processing.  It will not process the files in the input folder and alert the user the process will be running in Cosmic Clarity and no longer freeze PI.  Also resolved the issue that asked for an input image when none is needed for Batch processing.
+Removed the timeout error for Cosmic Clarity.  This will allow those running on CPU to not have the program timeout and still run and retrieve the file directly back into pixinsight
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-12-12T16:12:49.780Z" encoding="Base64">MUsi2RcpetSRJWx6I8FRacQiAe4XkSPk2AIt4DH0Ku5D5yZPOSBmTW6Q4ELevTBhwHOMWRLL2GBpZ65Dw3AeDA==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2024-12-14T14:58:55.536Z" encoding="Base64">wT/X8aoOavTsmb8vugj9u1m2oLBiX5izk0AoTJt3Qo4kMLgNDPET6dCERuJ25sbYrSaXo5PHlrKKSIIkeRMRDQ==</Signature>
