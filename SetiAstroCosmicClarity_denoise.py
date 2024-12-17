@@ -18,6 +18,8 @@ from tkinter import simpledialog, messagebox
 from tkinter import ttk
 import argparse  # For command-line argument parsing
 import onnxruntime as ort
+from skimage.restoration import denoise_tv_chambolle
+from joblib import Parallel, delayed
 
 
 
@@ -26,7 +28,24 @@ import onnxruntime as ort
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
 
-# Define the DenoiseCNN model with adjusted convolutional layers
+# Define the ResidualBlock
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+    
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out += residual
+        out = self.relu(out)
+        return out
+
+# Updated DenoiseCNN with Residual Blocks
 class DenoiseCNN(nn.Module):
     def __init__(self):
         super(DenoiseCNN, self).__init__()
@@ -35,81 +54,54 @@ class DenoiseCNN(nn.Module):
         self.encoder1 = nn.Sequential(
             nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer (16 -> 16)
-            nn.ReLU()
+            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder2 = nn.Sequential(
             nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer (32 -> 32)
-            nn.ReLU()
+            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder3 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional layer (64 -> 64) with dilation
-            nn.ReLU()
+            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder4 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer (128 -> 128)
-            nn.ReLU()
+            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder5 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2),  # 5th layer (128 -> 256) with dilation
             nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=2, dilation=2),  # Additional layer (256 -> 256) with dilation
-            nn.ReLU()
+            ResidualBlock(256)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         
         # Decoder (up-sampling path with skip connections)
         self.decoder5 = nn.Sequential(
             nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1),  # 256 + 128 feature maps from encoder4
             nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder4 = nn.Sequential(
             nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # 128 + 64 feature maps from encoder3
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder3 = nn.Sequential(
             nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder2 = nn.Sequential(
             nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
             nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder1 = nn.Sequential(
             nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
-
-    def forward(self, x):
-        # Encoder
-        e1 = self.encoder1(x)  # First encoding block
-        e2 = self.encoder2(e1)  # Second encoding block
-        e3 = self.encoder3(e2)  # Third encoding block
-        e4 = self.encoder4(e3)  # Fourth encoding block
-        e5 = self.encoder5(e4)  # Fifth encoding block
-        
-        # Decoder with skip connections
-        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
-        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
-        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
-        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
-        d1 = self.decoder1(d2)  # Final output layer
-
-        return d1
-
 
     def forward(self, x):
         # Encoder
@@ -159,7 +151,7 @@ def load_models(exe_dir, use_gpu=True):
         denoise_model = DenoiseCNN().to(device)
 
         # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3.pth"), map_location=device)
         if "model_state_dict" in checkpoint:
             denoise_model.load_state_dict(checkpoint["model_state_dict"])
         else:
@@ -180,7 +172,7 @@ def load_models(exe_dir, use_gpu=True):
         device = "DirectML"
 
         denoise_model = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_denoise_cnn.onnx"),
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3.onnx"),
             providers=["DmlExecutionProvider"]
         )
 
@@ -199,7 +191,7 @@ def load_models(exe_dir, use_gpu=True):
         denoise_model = DenoiseCNN().to(device)
 
         # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn.pth"), map_location=device)
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3weight.005.pth"), map_location=device)
         if "model_state_dict" in checkpoint:
             denoise_model.load_state_dict(checkpoint["model_state_dict"])
         else:
@@ -509,7 +501,7 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
     """
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
-    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', 'jpg', 'jpeg']:
         print(f"Ignoring non-image file: {image_path}")
         return None, None, None, None, None, None, None
 
@@ -659,11 +651,12 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
 
         # Add a border around the image with the median value
         image_with_border = add_border(image, border_size=16)
-        
+       
         # Check if the image needs stretching based on its median value
         stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.05
 
         if stretch_needed:
+            print("normalizing linear data")
             # Stretch the image
             stretched_image, original_min, original_medians = stretch_image(image_with_border)
         else:
@@ -672,6 +665,14 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             original_min = np.min(image_with_border)
             original_medians = [np.median(image_with_border[..., c]) for c in range(3)] if image_with_border.ndim == 3 else [np.median(image_with_border)]
 
+        # **Apply TV Denoise on the full image unconditionally**
+        #tv_weight = 0.005  # Fixed weight for TV denoising
+        #print(f"Applying Total Variation Denoising (TVDenoise) on the full image with fixed weight: {tv_weight}")
+        #denoised_full = np.zeros_like(stretched_image)
+        #for c in range(stretched_image.shape[2]):
+        #    denoised_full[:, :, c] = denoise_tv_chambolle(stretched_image[:, :, c], weight=tv_weight, channel_axis=-1)
+        #stretched_image = denoised_full
+        #print("TV Denoising applied.")
 
         # Process mono or color images
         if is_mono:
@@ -714,6 +715,7 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
 
         # Unstretch the image
         if stretch_needed:
+            print("de-normalizing linear data")
             denoised_image = unstretch_image(denoised_image, original_medians, original_min)
 
 
@@ -804,7 +806,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V6                         # 
+ *#              Cosmic Clarity - Denoise V6.2 AI3                   # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -949,7 +951,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
                         creator_app="Seti Astro Cosmic Clarity",
                         image_metadata=image_meta[0],      # First block of image metadata
                         xisf_metadata=file_meta,           # File-level metadata
-                        codec='lz4hc',
+
                         shuffle=True
                     )
                     print(f"Saved {bit_depth} XISF denoised image to: {output_image_path}")
