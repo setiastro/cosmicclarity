@@ -450,12 +450,12 @@ def get_user_input():
     # Stellar amount slider (only if Stellar or Both are selected)
     stellar_amount_label = ttk.Label(root, text="Stellar Sharpening Amount (0-1):")
     stellar_amount_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
-    stellar_amount_slider.set(0.9)  # Set default value to 0.9
+    stellar_amount_slider.set(0.5)  # Set default value to 0.5
 
     # Non-Stellar amount slider
     nonstellar_amount_label = ttk.Label(root, text="Non-Stellar Sharpening Amount (0-1):")
     nonstellar_amount_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
-    nonstellar_amount_slider.set(0.5)  # Set default value to 0.9
+    nonstellar_amount_slider.set(0.5)  # Set default value to 0.5
 
     # Separate RGB channels checkbox
     separate_rgb_label = ttk.Label(root, text="Sharpen R, G, B Channels Separately:")
@@ -507,60 +507,77 @@ def replace_border(original_image, processed_image, border_size=16):
 # Function to stretch an image
 def stretch_image(image):
     """
-    Perform a linear stretch on the image.
+    Perform a linear stretch on the image with unlinked channels for all images.
     """
     original_min = np.min(image)
     stretched_image = image - original_min  # Shift image so that the min is 0
-    original_median = np.median(stretched_image, axis=(0, 1)) if image.ndim == 3 else np.median(stretched_image)
 
+    # Capture the original medians before any further processing
+    original_medians = []
+    for c in range(3):  # Assume 3-channel input
+        channel_median = np.median(stretched_image[..., c])
+        original_medians.append(channel_median)
+
+    # Define the target median for stretching
     target_median = 0.25
-    if image.ndim == 3:  # RGB image case
-        # Calculate the overall median for color images as in original code
-        median_color = np.mean(np.median(stretched_image, axis=(0, 1)))
-        stretched_image = ((median_color - 1) * target_median * stretched_image) / (
-            median_color * (target_median + stretched_image - 1) - target_median * stretched_image)
-        stretched_medians = np.median(stretched_image, axis=(0, 1))
-    else:  # Grayscale image case
-        image_median = np.median(stretched_image)
-        stretched_image = ((image_median - 1) * target_median * stretched_image) / (
-            image_median * (target_median + stretched_image - 1) - target_median * stretched_image)
-        stretched_medians = np.median(stretched_image)
 
-    stretched_image = np.clip(stretched_image, 0, 1)  # Clip to [0, 1] range
+    # Apply the stretch for each channel
+    for c in range(3):
+        channel_median = original_medians[c]
+        if channel_median != 0:
+            stretched_image[..., c] = ((channel_median - 1) * target_median * stretched_image[..., c]) / (
+                channel_median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+            )
 
-    return stretched_image, original_min, original_median
+    # Clip stretched image to [0, 1] range
+    stretched_image = np.clip(stretched_image, 0, 1)
 
-# Function to unstretch an image with final median adjustment
-def unstretch_image(image, original_median, original_min):
+    # Return the stretched image, original min, and original medians
+    return stretched_image, original_min, original_medians
+
+
+
+# Function to unstretch an image
+def unstretch_image(image, original_medians, original_min):
     """
-    Undo the stretch to return the image to the original linear state.
+    Undo the stretch to return the image to the original linear state with unlinked channels.
+    Handles both single-channel and 3-channel images.
     """
-    if image.ndim == 3:  # RGB image case
-        # Use the overall median to revert the stretch for color images
-        median_color = np.mean(np.median(image, axis=(0, 1)))
-        unstretched_image = ((median_color - 1) * original_median * image) / (
-            median_color * (original_median + image - 1) - original_median * image)
-        final_medians = np.median(unstretched_image, axis=(0, 1))
-
-        # Adjust each channel to match the original median
-        #for c in range(3):  # R, G, B channels
-        #    unstretched_image[..., c] *= original_median[c] / final_medians[c]
-        #adjusted_medians = np.median(unstretched_image, axis=(0, 1))
-    else:  # Grayscale image case
-        image_median = np.median(image)
-        unstretched_image = ((image_median - 1) * original_median * image) / (
-            image_median * (original_median + image - 1) - original_median * image)
-        final_medians = np.median(unstretched_image)
-
-        # Adjust for grayscale case
-        #unstretched_image *= original_median / final_medians
-        #adjusted_medians = np.median(unstretched_image)
+    was_single_channel = False  # Local flag to check if the image was originally mono
 
 
-    unstretched_image += original_min  # Add back the original minimum
-    unstretched_image = np.clip(unstretched_image, 0, 1)  # Clip to [0, 1] range
 
-    return unstretched_image
+    # Check if the image is single-channel
+    if image.ndim == 3 and image.shape[2] == 1:
+        was_single_channel = True  # Mark the image as originally single-channel
+        image = np.repeat(image, 3, axis=2)  # Convert to 3-channel by duplicating
+
+    elif image.ndim == 2:  # True single-channel case
+        was_single_channel = True
+        image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+    # Process each channel independently
+    for c in range(3):  # Assume 3-channel input at this point
+        channel_median = np.median(image[..., c])
+        if channel_median != 0 and original_medians[c] != 0:
+
+            image[..., c] = ((channel_median - 1) * original_medians[c] * image[..., c]) / (
+                channel_median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+            )
+
+        else:
+            print(f"Channel {c} - Skipping unstretch due to zero median.")
+
+    image += original_min  # Add back the original minimum
+    image = np.clip(image, 0, 1)  # Clip to [0, 1] range
+
+    # If the image was originally single-channel, convert back to single-channel
+    if was_single_channel:
+        image = np.mean(image, axis=2, keepdims=True)  # Convert back to single-channel
+
+
+
+    return image
 
 # Function to add a border of median value around the image
 def add_border(image, border_size=16):
@@ -581,7 +598,7 @@ def remove_border(image, border_size=16):
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models, sharpen_channels_separately):
     # Only proceed if the file extension is an image format we support
     file_extension = image_path.lower().split('.')[-1]
-    if file_extension not in ['png', 'tif', 'tiff', 'fit', 'fits', 'xisf']:
+    if file_extension not in ['png', 'tif', 'tiff', 'fit', 'fits', 'xisf', 'jpg', 'jpeg']:
         print(f"Ignoring non-image file: {image_path}")
         return None, None, None, None, None, None  # Ignore and skip non-image files
     image = None
@@ -978,6 +995,7 @@ def sharpen_channel(channel, sharpening_mode, nonstellar_strength, stellar_amoun
             sharpened_channel = stellar_sharpened
         else:
             channel = stellar_sharpened  # Use stellar-sharpened as input for non-stellar sharpening
+            chunks = split_image_into_chunks_with_overlap(channel, chunk_size=256, overlap=64)
 
     # Use dictionary to select the non-stellar model based on nonstellar_strength
     model_map = {
@@ -1078,7 +1096,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity Suite - Sharpen V6                   # 
+ *#              Cosmic Clarity Suite - Sharpen V6.2 AI2             # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -1210,7 +1228,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                         creator_app="Seti Astro Cosmic Clarity",
                         image_metadata=image_meta[0],       # First block of image metadata
                         xisf_metadata=file_meta,            # File-level metadata
-                        codec='lz4hc',
+
                         shuffle=True
                     )
                     print(f"Saved {bit_depth} XISF sharpened image to: {output_image_path}")
