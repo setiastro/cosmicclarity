@@ -483,7 +483,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.1 AI2")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -888,7 +888,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
-    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef', 'jpg', 'jpeg']:
         print(f"Ignoring non-image file: {image_path}")
         return None, None, None, None, None, None, None, None
 
@@ -1070,18 +1070,6 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
                     original_header = fits.Header()
                     for key, value in original_header_dict.items():
                         original_header[key] = value
-
-                    # Debug save: Save the raw Bayer matrix with CFA info
-                    debug_output_path = os.path.join(os.path.dirname(image_path), "debug_bayer_image.fits")
-                    save_processed_image(
-                        image=image,
-                        output_path=debug_output_path,
-                        file_extension='.fits',
-                        bit_depth=bit_depth,
-                        original_header=original_header,
-                        is_mono=is_mono
-                    )
-                    print(f"Debug Bayer image saved successfully with CFA pattern: {cfa_description}")
 
             except Exception as e:
                 print(f"Error reading RAW file: {image_path}, {e}")
@@ -1361,6 +1349,7 @@ def save_processed_image(image, output_path, file_extension, bit_depth, original
                 tiff.imwrite(output_path, image[:, :, 0].astype(np.float32))
             else:
                 tiff.imwrite(output_path, image.astype(np.float32))
+
     elif file_extension == '.xisf':
         try:
             # Debug: Print original image details
@@ -1394,7 +1383,7 @@ def save_processed_image(image, output_path, file_extension, bit_depth, original
                 creator_app="Seti Astro Cosmic Clarity",
                 image_metadata=image_meta[0],  # First block of image metadata
                 xisf_metadata=file_meta,       # File-level metadata
-                codec='lz4hc',
+
                 shuffle=True
             )
             print(f"Saved {bit_depth} XISF image as RGB with metadata to: {output_path}")
