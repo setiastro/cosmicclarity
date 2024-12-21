@@ -609,6 +609,9 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
                 image = image.astype(np.float32) / 65535.0
                 bit_depth = "16-bit"
 
+            elif image.dtype == np.uint8:
+                image = image.astype(np.float32) / 255.0
+                bit_depth = "8-bit"
             elif image.dtype == np.uint32:
                 image = image.astype(np.float32) / 4294967295.0
                 bit_depth = "32-bit unsigned"
@@ -642,6 +645,9 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
             if image.dtype == np.uint16:
                 image = image.astype(np.float32) / 65535.0
                 bit_depth = "16-bit"
+            elif image.dtype == np.uint8:
+                image = image.astype(np.float32) / 255.0
+                bit_depth = "8-bit"                
             elif image.dtype == np.uint32:
                 image = image.astype(np.float32) / 4294967295.0
                 bit_depth = "32-bit unsigned"
@@ -1087,7 +1093,7 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity Suite - Sharpen V6.2 AI3             # 
+ *#              Cosmic Clarity Suite - Sharpen V6.3 AI3             # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -1154,6 +1160,12 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                         tiff.imwrite(output_image_path, (sharpened_image[:, :, 0] * 65535).astype(np.uint16))
                     else:
                         tiff.imwrite(output_image_path, (sharpened_image * 65535).astype(np.uint16))
+                elif bit_depth == "8-bit":
+                    actual_bit_depth = "8-bit"
+                    if is_mono:
+                        tiff.imwrite(output_image_path, (sharpened_image[:, :, 0] * 255.0).astype(np.uint8))
+                    else:
+                        tiff.imwrite(output_image_path, (sharpened_image * 255.0).astype(np.uint8))                          
                 elif bit_depth == "32-bit unsigned":
                     actual_bit_depth = "32-bit unsigned"
                     if is_mono:
@@ -1178,6 +1190,8 @@ def process_images(input_dir, output_dir, sharpening_mode=None, nonstellar_stren
                     # Adjust bit depth for saving
                     if bit_depth == "16-bit":
                         processed_image = (sharpened_image * 65535).astype(np.uint16)
+                    elif bit_depth == "8-bit":
+                        processed_image = (sharpened_image * 255.0).astype(np.uint8)                        
                     elif bit_depth == "32-bit unsigned":
                         processed_image = (sharpened_image * 4294967295).astype(np.uint32)
                     else:  # Default to 32-bit float
