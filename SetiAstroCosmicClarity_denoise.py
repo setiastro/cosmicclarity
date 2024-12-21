@@ -18,8 +18,8 @@ from tkinter import simpledialog, messagebox
 from tkinter import ttk
 import argparse  # For command-line argument parsing
 import onnxruntime as ort
-from skimage.restoration import denoise_tv_chambolle
-from joblib import Parallel, delayed
+
+
 
 
 
@@ -191,7 +191,7 @@ def load_models(exe_dir, use_gpu=True):
         denoise_model = DenoiseCNN().to(device)
 
         # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3weight.005.pth"), map_location=device)
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3.pth"), map_location=device)
         if "model_state_dict" in checkpoint:
             denoise_model.load_state_dict(checkpoint["model_state_dict"])
         else:
@@ -520,11 +520,17 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             if image.dtype == np.uint16:
                 image = image.astype(np.float32) / 65535.0
                 bit_depth = "16-bit"
+
+            elif image.dtype == np.uint8:
+                image = image.astype(np.float32) / 255.0
+                bit_depth = "8-bit"
             elif image.dtype == np.uint32:
                 image = image.astype(np.float32) / 4294967295.0
                 bit_depth = "32-bit unsigned"
-            elif image.dtype == np.float32:
-                bit_depth = "32-bit float"
+            else:
+                image.dtype == np.float32
+                bit_depth = "32-bit floating point"  # If dtype is already float
+
             print(f"Final bit depth set to: {bit_depth}")
 
             # Handle alpha channels and grayscale TIFFs
@@ -625,6 +631,9 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             if image.dtype == np.uint16:
                 image = image.astype(np.float32) / 65535.0
                 bit_depth = "16-bit"
+            elif image.dtype == np.uint8:
+                image = image.astype(np.float32) / 255.0
+                bit_depth = "8-bit"                
             elif image.dtype == np.uint32:
                 image = image.astype(np.float32) / 4294967295.0
                 bit_depth = "32-bit unsigned"
@@ -806,7 +815,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V6.2 AI3                   # 
+ *#              Cosmic Clarity - Denoise V6.3 AI3                   # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2024                              #
@@ -904,6 +913,12 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
                         tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 65535).astype(np.uint16))
                     else:  # RGB
                         tiff.imwrite(output_image_path, (denoised_image * 65535).astype(np.uint16))
+                elif bit_depth == "8-bit":
+                    actual_bit_depth = "8-bit"
+                    if is_mono:
+                        tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 255.0).astype(np.uint8))
+                    else:
+                        tiff.imwrite(output_image_path, (denoised_image * 255.0).astype(np.uint8))                               
                 elif bit_depth == "32-bit unsigned":
                     actual_bit_depth = "32-bit unsigned"
                     if is_mono is True:  # Grayscale
@@ -928,6 +943,8 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
                     # Adjust bit depth
                     if bit_depth == "16-bit":
                         processed_image = (denoised_image * 65535).astype(np.uint16)
+                    elif bit_depth == "8-bit":
+                        processed_image = (denoised_image * 255.0).astype(np.uint8)                        
                     elif bit_depth == "32-bit unsigned":
                         processed_image = (denoised_image * 4294967295).astype(np.uint32)
                     else:  # Default to 32-bit float
