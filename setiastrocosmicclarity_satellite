@@ -1,7 +1,7 @@
 # PyQt5 Imports
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QComboBox, QPushButton, QCheckBox, QFileDialog, QLineEdit, QTextEdit, QStyle, QProgressBar
+    QComboBox, QPushButton, QCheckBox, QFileDialog, QLineEdit, QTextEdit, QStyle, QProgressBar, QSlider
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
@@ -47,75 +47,117 @@ GLOBAL_CLIP_TRAIL = True  # Default to False
 GLOBAL_SKIP_SAVE = False
 
 
-# Binary Classification Model (Satellite Detection Model)
+# Define the Binary Classification Model
 class BinaryClassificationCNN(nn.Module):
     def __init__(self, input_channels=3):
         super(BinaryClassificationCNN, self).__init__()
+        
+        # First custom convolutional layer
+        self.pre_conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+        
+        # Second custom convolutional layer
+        self.pre_conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
+        
+        # ResNet18 backbone
         self.features = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        self.features.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.features.fc = nn.Linear(self.features.fc.in_features, 1)  # Single output for binary classification
-        self.sigmoid = nn.Sigmoid()
-
+        
+        # Replace the first layer of ResNet18 to match our second custom conv layer
+        self.features.conv1 = nn.Conv2d(64, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
+        # Replace the fully connected layer for binary classification
+        self.features.fc = nn.Linear(self.features.fc.in_features, 1)
+        
     def forward(self, x):
+        # Pass input through custom convolutional layers
+        x = self.pre_conv1(x)
+        x = self.pre_conv2(x)
+        
+        # Pass through ResNet18 backbone
         x = self.features(x)
-        x = self.sigmoid(x)
+        
         return x
 
 
+# Define the ResidualBlock
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+    
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out += residual
+        out = self.relu(out)
+        return out
 
+# Updated SharpeningCNN with Residual Blocks
 class SharpeningCNN(nn.Module):
     def __init__(self):
         super(SharpeningCNN, self).__init__()
         
         # Encoder (down-sampling path)
         self.encoder1 = nn.Sequential(
-            nn.Conv2d(3, 8, kernel_size=3, padding=1),  # 1st layer (3 -> 8 feature maps)
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),  # 2nd layer (8 -> 16 feature maps)
-            nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer (16 -> 16)
-            nn.ReLU()
+            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (16 -> 32)
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (32 -> 32)
-            nn.ReLU()
+            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (32 -> 64)
+            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (64 -> 64)
-            nn.ReLU()
+            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder4 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (64 -> 128)
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (128 -> 128)
-            nn.ReLU()
+            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
+        )
+        self.encoder5 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2),  # 5th layer (128 -> 256) with dilation
+            nn.ReLU(),
+            ResidualBlock(256)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         
         # Decoder (up-sampling path with skip connections)
-        self.decoder4 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # Combine with encoder3 output
+        self.decoder5 = nn.Sequential(
+            nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1),  # 256 + 128 feature maps from encoder4
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
+        )
+        self.decoder4 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # 128 + 64 feature maps from encoder3
+            nn.ReLU(),
+            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder3 = nn.Sequential(
-            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # Combine with encoder2 output
+            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder2 = nn.Sequential(
-            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # Combine with encoder1 output
+            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
             nn.ReLU(),
-            nn.Conv2d(16, 8, kernel_size=3, padding=1),  # Additional layer (16 -> 8 feature maps)
-            nn.ReLU()
+            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder1 = nn.Sequential(
-            nn.Conv2d(8, 3, kernel_size=3, padding=1),  # Output layer (8 -> 3 channels for RGB output)
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
@@ -124,12 +166,14 @@ class SharpeningCNN(nn.Module):
         e1 = self.encoder1(x)  # First encoding block
         e2 = self.encoder2(e1)  # Second encoding block
         e3 = self.encoder3(e2)  # Third encoding block
-        e4 = self.encoder4(e3)  # Fourth encoding block (128 feature maps with dilation)
-
+        e4 = self.encoder4(e3)  # Fourth encoding block
+        e5 = self.encoder5(e4)  # Fifth encoding block
+        
         # Decoder with skip connections
-        d4 = self.decoder4(torch.cat([e4, e3], dim=1))  # Combine with encoder3 output
-        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Combine with encoder2 output
-        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Combine with encoder1 output
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
         d1 = self.decoder1(d2)  # Final output layer
 
         return d1
@@ -139,6 +183,52 @@ class SharpeningCNN(nn.Module):
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
 cached_models = None
+
+def load_model_weights(model, checkpoint_path, device):
+    """
+    Load the weights from a checkpoint into the model, ignoring extra keys.
+
+    Args:
+        model (torch.nn.Module): The PyTorch model to load weights into.
+        checkpoint_path (str): Path to the checkpoint file.
+        device (torch.device): Device to load the model onto.
+
+    Returns:
+        torch.nn.Module: The model with loaded weights.
+    """
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Determine the state_dict based on checkpoint structure
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
+
+    # Handle prefix differences (e.g., "module.")
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+    # Compare model state dict and checkpoint keys
+    model_state_dict = model.state_dict()
+    filtered_state_dict = {
+        k: v for k, v in state_dict.items()
+        if k in model_state_dict and model_state_dict[k].shape == v.shape
+    }
+
+    # Print debug information for mismatches
+    missing_keys = [k for k in model_state_dict.keys() if k not in filtered_state_dict]
+    unexpected_keys = [k for k in state_dict.keys() if k not in model_state_dict]
+
+    if missing_keys:
+        print(f"Missing keys in loaded state_dict: {missing_keys[:10]}...")
+    if unexpected_keys:
+        print(f"Unexpected keys in checkpoint: {unexpected_keys[:10]}...")
+
+    # Load the weights
+    model.load_state_dict(filtered_state_dict, strict=False)
+    print(f"Loaded {len(filtered_state_dict)}/{len(model_state_dict)} layers successfully.")
+    return model
+
 
 def load_models(exe_dir, use_gpu=True):
     """
@@ -155,28 +245,22 @@ def load_models(exe_dir, use_gpu=True):
     device = None
 
     if torch.cuda.is_available() and use_gpu:
-        # Load CUDA models
+        # Use CUDA
         if cached_models:
             return cached_models
 
         device = torch.device("cuda")
         print(f"Using device: {device} (CUDA)")
 
-        # Load PyTorch detection model
+        # Load detection model
         detection_model = BinaryClassificationCNN(input_channels=3).to(device)
-        detection_model.load_state_dict(
-            torch.load(os.path.join(exe_dir, "satellite_trail_detector.pth"), 
-                       map_location=device, weights_only=True)
-        )
-        detection_model.eval().to(device)
+        detection_model = load_model_weights(detection_model, os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"), device)
+        detection_model.eval()
 
-        # Load PyTorch removal model
+        # Load removal model
         removal_model = SharpeningCNN().to(device)
-        removal_model.load_state_dict(
-            torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"), 
-                       map_location=device, weights_only=True)
-        )
-        removal_model.eval().to(device)
+        removal_model = load_model_weights(removal_model, os.path.join(exe_dir, "satelliteremovalAI3.pth"), device)
+        removal_model.eval()
 
         # Cache and return models
         cached_models = {
@@ -188,21 +272,20 @@ def load_models(exe_dir, use_gpu=True):
         return cached_models
 
     elif "DmlExecutionProvider" in ort.get_available_providers() and use_gpu:
-        # Load DirectML models
+        # Use DirectML for ONNX models
         print("Using DirectML for ONNX Runtime.")
 
         device = "DirectML"  # Representing device as a string for DirectML
         detection_model = ort.InferenceSession(
-            os.path.join(exe_dir, "satellite_trail_detector.onnx"),
+            os.path.join(exe_dir, "satellite_trail_detector_AI3.onnx"),
             providers=["DmlExecutionProvider"]
         )
 
         removal_model = ort.InferenceSession(
-            os.path.join(exe_dir, "satelliteremoval128featuremaps.onnx"),
+            os.path.join(exe_dir, "satelliteremovalAI3.onnx"),
             providers=["DmlExecutionProvider"]
         )
 
-        # Return ONNX models
         return {
             "detection_model": detection_model,
             "removal_model": removal_model,
@@ -211,26 +294,20 @@ def load_models(exe_dir, use_gpu=True):
         }
 
     else:
-        # CPU fallback
+        # Use CPU
         print("No GPU acceleration available. Using CPU.")
 
         device = torch.device("cpu")
 
-        # Load PyTorch detection model
+        # Load detection model
         detection_model = BinaryClassificationCNN(input_channels=3).to(device)
-        detection_model.load_state_dict(
-            torch.load(os.path.join(exe_dir, "satellite_trail_detector.pth"), 
-                       map_location=device, weights_only=True)
-        )
-        detection_model.eval().to(device)
+        detection_model = load_model_weights(detection_model, os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"), device)
+        detection_model.eval()
 
-        # Load PyTorch removal model
+        # Load removal model
         removal_model = SharpeningCNN().to(device)
-        removal_model.load_state_dict(
-            torch.load(os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"), 
-                       map_location=device, weights_only=True)
-        )
-        removal_model.eval().to(device)
+        removal_model = load_model_weights(removal_model, os.path.join(exe_dir, "satelliteremovalAI3.pth"), device)
+        removal_model.eval()
 
         return {
             "detection_model": detection_model,
@@ -238,8 +315,6 @@ def load_models(exe_dir, use_gpu=True):
             "device": device,
             "is_onnx": False,
         }
-
-
 
 
 def load_detection_model(model_path, device, is_onnx=False):
@@ -376,7 +451,7 @@ class FolderMonitor(QThread):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(float)
 
-    def __init__(self, input_dir, output_dir, models, satellite_mode):
+    def __init__(self, input_dir, output_dir, models, satellite_mode, clip_trail=None, skip_save=None, sensitivity=0.1):
         super().__init__()
         self.input_dir = input_dir
         self.output_dir = output_dir
@@ -385,7 +460,9 @@ class FolderMonitor(QThread):
         self.running = True
         self.is_onnx = models.get("is_onnx", False)
         self.processed_files = set()  # Initialize processed files list
-        self.clip_trail = GLOBAL_CLIP_TRAIL  # Use the global variable for clip trail
+        self.clip_trail = clip_trail if clip_trail is not None else GLOBAL_CLIP_TRAIL  # Use the provided or global variable
+        self.skip_save = skip_save if skip_save is not None else GLOBAL_SKIP_SAVE
+        self.sensitivity = sensitivity  # Store the sensitivity value
 
     def log_message(self, message):
         """Log a message using the provided signal or print to the console."""
@@ -418,11 +495,12 @@ class FolderMonitor(QThread):
                 for new_file in new_files:
                     # Skip files with the "_satellited" suffix to avoid reprocessing
                     if "_satellited" in new_file:
+                        self.processed_files.add(new_file)
                         continue
 
                     file_path = os.path.join(self.input_dir, new_file)
                     self.log_signal.emit(f"Detected new file: {new_file}")
-                    
+
                     # Add a 5-second delay before processing
                     self.log_signal.emit(f"Waiting 5 seconds to ensure the file is fully saved...")
                     time.sleep(5)
@@ -435,12 +513,14 @@ class FolderMonitor(QThread):
                             self.models['detection_model'],
                             self.models['removal_model'],
                             self.satellite_mode,
+                            sensitivity=self.sensitivity,  # Pass sensitivity
                             log_signal=self.log_signal,
                             progress_signal=self.progress_signal,
                             is_onnx=self.is_onnx  # Pass ONNX flag
                         )
+
                         # Handle the Skip Save logic based on trail detection and user preference
-                        if not trail_detected_in_image and GLOBAL_SKIP_SAVE:
+                        if not trail_detected_in_image and self.skip_save:
                             self.log_signal.emit(f"Skipped: No satellite trail detected in {new_file}")
                             self.processed_files.add(new_file)
                             continue
@@ -479,11 +559,12 @@ class FolderMonitor(QThread):
                 self.log_signal.emit(f"Error monitoring folder: {e}")
 
 
+
 class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.1 AI2")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.2 AI3")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -504,8 +585,7 @@ class SatelliteToolDialog(QDialog):
         self.models = None
         self.live_monitor_thread = None       
         self.log_signal.connect(self.log_message)
-
-                
+        self.sensitivity = 0.1  # Default value               
  
 
         # Main layout
@@ -566,6 +646,23 @@ class SatelliteToolDialog(QDialog):
         self.clip_trail_checkbox.stateChanged.connect(self.update_clip_trail)
         layout.addWidget(self.clip_trail_checkbox)
 
+        # Sensitivity Slider
+        sensitivity_layout = QHBoxLayout()
+        sensitivity_label = QLabel("Clipping Sensitivity (Smaller Value more aggressive clipping):")
+        self.sensitivity_value_label = QLabel(f"{self.sensitivity:.2f}")
+        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider.setMinimum(1)   # Represents 0.01
+        self.sensitivity_slider.setMaximum(50)  # Represents 0.5
+        self.sensitivity_slider.setValue(int(self.sensitivity * 100))  # e.g., 0.1 * 100 = 10
+        self.sensitivity_slider.setTickInterval(1)
+        self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
+        self.sensitivity_slider.valueChanged.connect(self.update_sensitivity)
+
+        sensitivity_layout.addWidget(sensitivity_label)
+        sensitivity_layout.addWidget(self.sensitivity_slider)
+        sensitivity_layout.addWidget(self.sensitivity_value_label)
+        layout.addLayout(sensitivity_layout)        
+
         # Add "Skip Saving if No Trail Detected" checkbox
         self.skip_save_checkbox = QCheckBox("Skip Saving if No Trail Detected")
         self.skip_save_checkbox.setChecked(False)  # Default to not skipping
@@ -609,6 +706,13 @@ class SatelliteToolDialog(QDialog):
         layout.addWidget(footer_label)
 
         self.setLayout(layout)
+
+    def update_sensitivity(self, value):
+        """
+        Update the sensitivity value based on the slider position.
+        """
+        self.sensitivity = value / 100.0  # Convert integer back to float (0.01 to 0.5)
+        self.sensitivity_value_label.setText(f"{self.sensitivity:.2f}")
 
     def update_skip_save(self, state):
         global GLOBAL_SKIP_SAVE
@@ -658,14 +762,20 @@ class SatelliteToolDialog(QDialog):
         satellite_mode = self.mode_dropdown.currentText()
 
         self.live_monitor_thread = FolderMonitor(
-            self.input_dir,
-            self.output_dir,
-            self.models,
-            satellite_mode
+            input_dir=self.input_dir,
+            output_dir=self.output_dir,
+            models=self.models,
+            satellite_mode=satellite_mode,
+            clip_trail=self.clip_trail_checkbox.isChecked(),
+            skip_save=self.skip_save_checkbox.isChecked(),
+            sensitivity=self.sensitivity
         )
         self.live_monitor_thread.log_signal.connect(self.log_message)
         self.live_monitor_thread.progress_signal.connect(self.update_progress_bar)
         self.live_monitor_thread.start()
+
+        self.sensitivity_slider.setEnabled(False)
+        self.log_message("Sensitivity slider disabled during live monitoring.")
 
         self.live_monitor_button.setEnabled(False)
         self.stop_monitor_button.setEnabled(True)
@@ -677,6 +787,9 @@ class SatelliteToolDialog(QDialog):
             self.live_monitor_button.setEnabled(True)
             self.stop_monitor_button.setEnabled(False)
             self.log_message("Live monitor stopped.")
+            # **Re-enable the sensitivity slider**
+            self.sensitivity_slider.setEnabled(True)
+            self.log_message("Sensitivity slider re-enabled after stopping live monitoring.")            
 
     def process_input_folder(self):
         """Start batch processing in a separate thread."""
@@ -693,11 +806,13 @@ class SatelliteToolDialog(QDialog):
 
         # Create and start the batch processing thread
         self.batch_processor = BatchProcessor(
-            self.input_dir,
-            self.output_dir,
-            self.models,
-            self.mode_dropdown.currentText(),
-            self.clip_trail_checkbox
+            input_dir=self.input_dir,
+            output_dir=self.output_dir,
+            models=self.models,
+            satellite_mode=self.mode_dropdown.currentText(),
+            clip_trail=self.clip_trail_checkbox.isChecked(),
+            skip_save=self.skip_save_checkbox.isChecked(),
+            sensitivity=self.sensitivity
         )
         self.batch_processor.log_signal.connect(self.log_message)
         self.batch_processor.progress_signal.connect(self.update_progress_bar)
@@ -876,7 +991,7 @@ def set_clip_trail(value):
 
 
 # Function to satellite the image
-def satellite_image(image_path, device, detection_model, removal_model, satellite_mode='luminance', progress_signal=None, log_signal=None, is_onnx=False):
+def satellite_image(image_path, device, detection_model, removal_model, satellite_mode='luminance', sensitivity=0.1, progress_signal=None, log_signal=None, is_onnx=False):
     def log_message(message):
         print(message)  # Always log to console
         if log_signal:
@@ -1115,7 +1230,9 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         if satellite_mode == 'luminance' and is_mono:
             # Extract luminance (single-channel processing for mono)
             satellited_image, trail_detected_in_image = satellite_channel(
-                stretched_image[:, :, 0], device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal, is_onnx=is_onnx
+                stretched_image[:, :, 0], device, removal_model, detection_model, 
+                is_mono=True, sensitivity=sensitivity,  
+                progress_signal=progress_signal, is_onnx=is_onnx
             )
             satellited_image = satellited_image[:, :, np.newaxis]  # Convert back to single channel
 
@@ -1123,18 +1240,22 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
             # Extract luminance and process only that channel
             luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
             satellited_image, trail_detected_in_image = satellite_channel(
-                luminance, device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal, is_onnx=is_onnx
+                luminance, device, removal_model, detection_model, 
+                is_mono=True, sensitivity=sensitivity, 
+                progress_signal=progress_signal, is_onnx=is_onnx
             )
             satellited_image = merge_luminance(satellited_image, cb_channel, cr_channel)
 
         else:  # Full RGB denoising mode
             # Process the 3-channel image directly
             satellited_image, trail_detected_in_image = satellite_channel(
-                stretched_image, device, removal_model, detection_model, is_mono=False, progress_signal=progress_signal, is_onnx=is_onnx
+                stretched_image, device, removal_model, detection_model, 
+                is_mono=False, sensitivity=sensitivity, 
+                progress_signal=progress_signal, is_onnx=is_onnx
             )
 
-            # Skip saving if no trail is detected
-        if not trail_detected_in_image:
+        # Handle skipping saving if no trail detected
+        if not trail_detected_in_image :
             log_message(f"No satellite trail detected in {image_path}. Proceeding with unmodified image.")
             satellited_image = stretched_image  # Use the stretched (or original) image as the output  
 
@@ -1143,11 +1264,10 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
             print(f"De-normalizing linear data")
             satellited_image = unstretch_image(satellited_image, original_medians, original_min)       
 
-        # If GLOBAL_CLIP_TRAIL is True, set pixels with the minimum value to 0
+        # Apply clip trail logic based on the `clip_trail` flag
         if GLOBAL_CLIP_TRAIL:
             min_value = np.min(satellited_image)
             satellited_image = np.where(satellited_image == min_value, 0.000, satellited_image)
-
 
         # Remove the border added around the image
         satellited_image = replace_border(original_image, satellited_image, border_size=16)
@@ -1163,7 +1283,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
 
  
-def satellite_channel(image, device, removal_model, detection_model, is_mono=False, progress_signal=None, is_onnx=False):
+def satellite_channel(image, device, removal_model, detection_model, is_mono=False, sensitivity=0.1, progress_signal=None, is_onnx=False):
     chunk_size = 256
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(image, chunk_size=chunk_size, overlap=overlap)
@@ -1196,7 +1316,7 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
             else:
                 processed_chunk = run_torch_removal(chunk_tensor, removal_model)
 
-            final_chunk = apply_clip_trail_logic(processed_chunk, original_chunk) if GLOBAL_CLIP_TRAIL else processed_chunk
+            final_chunk = apply_clip_trail_logic(processed_chunk, original_chunk, sensitivity) if GLOBAL_CLIP_TRAIL else processed_chunk
             satellited_chunks.append((final_chunk, i, j))
         else:
             satellited_chunks.append((chunk, i, j))
@@ -1281,12 +1401,13 @@ def prepare_chunk_for_onnx(chunk):
     resized_chunk = resize(chunk, (256, 256, chunk.shape[2]), mode='reflect', anti_aliasing=True)
     return np.transpose(resized_chunk, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
 
-def apply_clip_trail_logic(processed_chunk, original_chunk):
+def apply_clip_trail_logic(processed_chunk, original_chunk, sensitivity=0.1):
     sattrail_only_image = original_chunk - processed_chunk
     mean_val = np.mean(sattrail_only_image)
     clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
-    binary_mask = np.where(clipped_image < 0.25, 0, 1)
+    binary_mask = np.where(clipped_image < sensitivity, 0, 1)
     return np.clip(original_chunk - binary_mask, 0, 1)
+
 
 
 def save_processed_image(image, output_path, file_extension, bit_depth, original_header=None, is_mono=False, file_meta=None, image_meta=None):
@@ -1475,16 +1596,16 @@ class BatchProcessor(QThread):
     log_signal = pyqtSignal(str)
     processing_complete = pyqtSignal()
 
-    def __init__(self, input_dir, output_dir, models, satellite_mode, clip_trail=None, skip_save=None):
+    def __init__(self, input_dir, output_dir, models, satellite_mode, clip_trail=None, skip_save=None, sensitivity=0.1):
         super().__init__()
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.models = models
         self.satellite_mode = satellite_mode
-        self.is_onnx = models.get("is_onnx",False)
-        self.clip_trail = GLOBAL_CLIP_TRAIL
-        self.skip_save = GLOBAL_SKIP_SAVE
-        
+        self.is_onnx = models.get("is_onnx", False)
+        self.clip_trail = clip_trail if clip_trail is not None else GLOBAL_CLIP_TRAIL
+        self.skip_save = skip_save if skip_save is not None else GLOBAL_SKIP_SAVE
+        self.sensitivity = sensitivity  # Store the sensitivity value
 
     def run(self):
         try:
@@ -1515,6 +1636,7 @@ class BatchProcessor(QThread):
                         self.models["detection_model"],
                         self.models["removal_model"],
                         self.satellite_mode,
+                        sensitivity=self.sensitivity,  # Pass sensitivity
                         log_signal=self.log_signal,
                         progress_signal=self.progress_signal,  # Pass chunk-level progress
                         is_onnx=self.is_onnx
@@ -1525,7 +1647,7 @@ class BatchProcessor(QThread):
                         self.log_signal.emit(f"Failed to process: {image_name}")
                         continue
 
-                    if not trail_detected_in_image and GLOBAL_SKIP_SAVE:
+                    if not trail_detected_in_image and self.skip_save:
                         # Skip saving if no trail is detected and skip save is enabled
                         self.log_signal.emit(f"Skipped: No satellite trail detected in {image_name}")
                         continue
@@ -1553,11 +1675,11 @@ class BatchProcessor(QThread):
                 overall_progress = (processed_files / total_files) * 100
                 self.progress_signal.emit(overall_progress)
 
-            
         except Exception as e:
             self.log_signal.emit(f"Error during batch processing: {e}")
         finally:
             self.processing_complete.emit()
+
 
 class ProgressMonitorDialog(QDialog):
     def __init__(self):
@@ -1600,15 +1722,21 @@ if __name__ == "__main__":
     parser.add_argument("--batch", action="store_true", help="Enable batch processing mode for the input directory.")
     parser.add_argument("--monitor", action="store_true", help="Enable live folder monitoring for new files.")
     parser.add_argument("--clip-trail", action="store_true", default=True, help="Clip satellite trail to 0.000 after processing.")
-    parser.add_argument("--skip-save", action="store_true", default=False, help="Skip saving images if no satellite trail is detected.",
-)
+    parser.add_argument("--skip-save", action="store_true", default=False, help="Skip saving images if no satellite trail is detected.")
+    parser.add_argument("--sensitivity", type=float, default=0.1, help="Sensitivity for clip trail logic (0.01 to 0.5).")  # New argument                    
+
 
     args = parser.parse_args()
+
+    # Validate sensitivity range
+    if not 0.01 <= args.sensitivity <= 0.5:
+        parser.error("The --sensitivity value must be between 0.01 and 0.5.")    
 
     # Declare global before assignment
 
     GLOBAL_CLIP_TRAIL = args.clip_trail  # Update based on the parsed argument
-    GLOBAL_SKIP_SAVE = args.skip_save    
+    GLOBAL_SKIP_SAVE = args.skip_save 
+    GLOBAL_SENSITIVITY = args.sensitivity   
 
     app = QApplication([])  # Initialize the Qt application
 
@@ -1624,7 +1752,8 @@ if __name__ == "__main__":
             print(f"Use GPU: {use_gpu}")
             print(f"Satellite Mode: {satellite_mode}")
             print(f"Clip Trail: {GLOBAL_CLIP_TRAIL}")
-            print(f"Skip Save: {GLOBAL_SKIP_SAVE}")            
+            print(f"Skip Save: {GLOBAL_SKIP_SAVE}")      
+            print(f"Sensitivity: {GLOBAL_SENSITIVITY}")      
 
             # Load models
             models = load_models(exe_dir, use_gpu)
@@ -1650,7 +1779,8 @@ if __name__ == "__main__":
                     models=models,
                     satellite_mode=satellite_mode,
                     clip_trail=GLOBAL_CLIP_TRAIL,
-                    skip_save=GLOBAL_SKIP_SAVE
+                    skip_save=GLOBAL_SKIP_SAVE,
+                    sensitivity=GLOBAL_SENSITIVITY  # Pass sensitivity
                 )
                 batch_processor.log_signal.connect(log_message)
                 batch_processor.progress_signal.connect(update_progress)
@@ -1679,6 +1809,9 @@ if __name__ == "__main__":
                     output_dir=output_dir,
                     models=models,
                     satellite_mode=satellite_mode,
+                    clip_trail=GLOBAL_CLIP_TRAIL,
+                    skip_save=GLOBAL_SKIP_SAVE,
+                    sensitivity=GLOBAL_SENSITIVITY  # Pass sensitivity
                 )
                 folder_monitor.log_signal.connect(log_message)
                 folder_monitor.progress_signal.connect(update_progress)
