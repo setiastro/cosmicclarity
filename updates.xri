@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity12.14.2024.zip" sha1="1b2872403a2790214f48036254ecee5b89299d66" type="script" releaseDate="20241214">
+      <package fileName="SetiAstroCosmicClarity01.06.2025.zip" sha1="ab1d82707235dec7e41fbe120d04cf9aaca1baa4" type="script" releaseDate="20240106">
          <title>
         Cosmic Clarity Sharpen and Denoise
       </title>
          <description>
             <p>
-Removed the timeout error for Cosmic Clarity.  This will allow those running on CPU to not have the program timeout and still run and retrieve the file directly back into pixinsight
+Scripts updated to have a fully integrated call solution to Cosmic Clarity Sharpen and Denoise.  This allows the progress to be directly shown in the console.
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2024-12-14T14:58:55.536Z" encoding="Base64">wT/X8aoOavTsmb8vugj9u1m2oLBiX5izk0AoTJt3Qo4kMLgNDPET6dCERuJ25sbYrSaXo5PHlrKKSIIkeRMRDQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2025-01-06T15:37:34.659Z" encoding="Base64">8tPM/45TIy/4SVBT/lRX+0Arb+8AdQXYsR8Vp1YAqm3R/oo00hwE2fXeaiQMETBqeUrgj7ed+VdppiR92F5EBg==</Signature>
