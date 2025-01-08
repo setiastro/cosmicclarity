@@ -28,7 +28,7 @@ from torchvision import models, transforms
 from torchvision.models import ResNet18_Weights
 import lz4.block
 import zstandard
-
+from torchvision.models import MobileNet_V2_Weights
 import torch.sparse
 import torch._C
 import onnxruntime as ort
@@ -46,6 +46,64 @@ from skimage.transform import resize
 GLOBAL_CLIP_TRAIL = True  # Default to False
 GLOBAL_SKIP_SAVE = False
 
+class BinaryClassificationCNN2(nn.Module):
+    def __init__(self, input_channels=3):
+        super(BinaryClassificationCNN2, self).__init__()
+        
+        # ---------------------------------------------------------
+        # (A) Two initial "custom" convolutional layers
+        # ---------------------------------------------------------
+        # First custom convolutional layer
+        self.pre_conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+        
+        # Second custom convolutional layer
+        self.pre_conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
+        
+        # ---------------------------------------------------------
+        # (B) MobileNetV2 backbone
+        # ---------------------------------------------------------
+        # Load pretrained MobileNetV2
+        self.mobilenet = models.mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
+
+        # By default, MobileNetV2 expects (N, 3, H, W). But after our pre_conv2, we have 64 channels. 
+        # We need to override MobileNetV2's first convolution to handle 64 -> 32.
+        # mobilenet.features[0] is a Sequential of (Conv2d, BatchNorm2d, ReLU6).
+        # So we replace the *first Conv2d* layer to accept 64 channels:
+        self.mobilenet.features[0][0] = nn.Conv2d(
+            in_channels=64,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False
+        )
+
+        # ---------------------------------------------------------
+        # (C) Replace the final classification layer
+        # ---------------------------------------------------------
+        # The final classifier (mobilenet.classifier) is typically:
+        #   (Dropout(...), Linear(in_features=1280, out_features=1000, ...))
+        # We want just 1 output for binary classification.
+        in_features = self.mobilenet.classifier[-1].in_features
+        self.mobilenet.classifier[-1] = nn.Linear(in_features, 1)
+        
+    def forward(self, x):
+        # Pass input through your custom convolutional layers
+        x = self.pre_conv1(x)   # => shape (N, 32, H, W)
+        x = self.pre_conv2(x)   # => shape (N, 64, H, W)
+        
+        # Pass through MobileNetV2 backbone (which now starts with a 64->32 conv)
+        x = self.mobilenet(x)
+        
+        return x
 
 # Define the Binary Classification Model
 class BinaryClassificationCNN(nn.Module):
@@ -252,19 +310,37 @@ def load_models(exe_dir, use_gpu=True):
         device = torch.device("cuda")
         print(f"Using device: {device} (CUDA)")
 
-        # Load detection model
-        detection_model = BinaryClassificationCNN(input_channels=3).to(device)
-        detection_model = load_model_weights(detection_model, os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"), device)
-        detection_model.eval()
+        # Load primary detection model (ResNet18-based)
+        detection_model1 = BinaryClassificationCNN(input_channels=3).to(device)
+        detection_model1 = load_model_weights(
+            detection_model1,
+            os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"),
+            device
+        )
+        detection_model1.eval()
+
+        # Load secondary detection model (MobileNetV2-based)
+        detection_model2 = BinaryClassificationCNN2(input_channels=3).to(device)
+        detection_model2 = load_model_weights(
+            detection_model2,
+            os.path.join(exe_dir, "satellite_trail_detector_mobilenetv2.pth"),
+            device
+        )
+        detection_model2.eval()
 
         # Load removal model
         removal_model = SharpeningCNN().to(device)
-        removal_model = load_model_weights(removal_model, os.path.join(exe_dir, "satelliteremovalAI3.pth"), device)
+        removal_model = load_model_weights(
+            removal_model,
+            os.path.join(exe_dir, "satelliteremovalAI3.pth"),
+            device
+        )
         removal_model.eval()
 
         # Cache and return models
         cached_models = {
-            "detection_model": detection_model,
+            "detection_model1": detection_model1,
+            "detection_model2": detection_model2,
             "removal_model": removal_model,
             "device": device,
             "is_onnx": False,
@@ -276,18 +352,22 @@ def load_models(exe_dir, use_gpu=True):
         print("Using DirectML for ONNX Runtime.")
 
         device = "DirectML"  # Representing device as a string for DirectML
-        detection_model = ort.InferenceSession(
+        detection_model1 = ort.InferenceSession(
             os.path.join(exe_dir, "satellite_trail_detector_AI3.onnx"),
             providers=["DmlExecutionProvider"]
         )
-
+        detection_model2 = ort.InferenceSession(
+            os.path.join(exe_dir, "satellite_trail_detector_mobilenetv2.onnx"),
+            providers=["DmlExecutionProvider"]
+        )
         removal_model = ort.InferenceSession(
             os.path.join(exe_dir, "satelliteremovalAI3.onnx"),
             providers=["DmlExecutionProvider"]
         )
 
         return {
-            "detection_model": detection_model,
+            "detection_model1": detection_model1,
+            "detection_model2": detection_model2,
             "removal_model": removal_model,
             "device": device,
             "is_onnx": True,
@@ -299,22 +379,41 @@ def load_models(exe_dir, use_gpu=True):
 
         device = torch.device("cpu")
 
-        # Load detection model
-        detection_model = BinaryClassificationCNN(input_channels=3).to(device)
-        detection_model = load_model_weights(detection_model, os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"), device)
-        detection_model.eval()
+        # Load primary detection model (ResNet18-based)
+        detection_model1 = BinaryClassificationCNN(input_channels=3).to(device)
+        detection_model1 = load_model_weights(
+            detection_model1,
+            os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"),
+            device
+        )
+        detection_model1.eval()
+
+        # Load secondary detection model (MobileNetV2-based)
+        detection_model2 = BinaryClassificationCNN2(input_channels=3).to(device)
+        detection_model2 = load_model_weights(
+            detection_model2,
+            os.path.join(exe_dir, "satellite_trail_detector_mobilenetv2.pth"),
+            device
+        )
+        detection_model2.eval()
 
         # Load removal model
         removal_model = SharpeningCNN().to(device)
-        removal_model = load_model_weights(removal_model, os.path.join(exe_dir, "satelliteremovalAI3.pth"), device)
+        removal_model = load_model_weights(
+            removal_model,
+            os.path.join(exe_dir, "satelliteremovalAI3.pth"),
+            device
+        )
         removal_model.eval()
 
         return {
-            "detection_model": detection_model,
+            "detection_model1": detection_model1,
+            "detection_model2": detection_model2,
             "removal_model": removal_model,
             "device": device,
             "is_onnx": False,
         }
+
 
 
 def load_detection_model(model_path, device, is_onnx=False):
@@ -339,6 +438,29 @@ def load_detection_model(model_path, device, is_onnx=False):
     detection_model.eval().to(device)
     print(f"Detection model loaded onto device: {device}")
     return detection_model
+
+def load_detection_model2(model_path, device, is_onnx=False):
+    """
+    Load the pre-trained satellite detection model.
+
+    Args:
+        model_path (str): Path to the detection model.
+        device (torch.device): Device to load the model onto.
+        is_onnx (bool): Whether to use ONNX Runtime for DirectML.
+
+    Returns:
+        torch.nn.Module or ort.InferenceSession: The detection model.
+    """
+    if is_onnx:
+        # Load ONNX model for DirectML
+        return ort.InferenceSession(model_path, providers=["DmlExecutionProvider"])
+
+    # Load PyTorch detection model
+    detection_model2 = BinaryClassificationCNN2(input_channels=3).to(device)
+    detection_model2.load_state_dict(torch.load(model_path, map_location=device))
+    detection_model2.eval().to(device)
+    print(f"Detection model loaded onto device: {device}")
+    return detection_model2
 
 
 # Function to extract luminance (Y channel) directly using a matrix for 32-bit float precision
@@ -510,14 +632,16 @@ class FolderMonitor(QThread):
                         satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta, trail_detected_in_image = satellite_image(
                             file_path,
                             self.models['device'],
-                            self.models['detection_model'],
+                            self.models['detection_model1'],  # Primary detection model
+                            self.models['detection_model2'],  # Secondary detection model
                             self.models['removal_model'],
                             self.satellite_mode,
                             sensitivity=self.sensitivity,  # Pass sensitivity
                             log_signal=self.log_signal,
                             progress_signal=self.progress_signal,
-                            is_onnx=self.is_onnx  # Pass ONNX flag
+                            is_onnx=self.is_onnx
                         )
+
 
                         # Handle the Skip Save logic based on trail detection and user preference
                         if not trail_detected_in_image and self.skip_save:
@@ -564,7 +688,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.2 AI3")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.3 AI3")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -965,24 +1089,6 @@ def remove_border(image, border_size=5):
     else:
         return image[border_size:-border_size, border_size:-border_size, :]
 
-# Function to load the satellite detection model
-def load_detection_model(model_path, device):
-    """
-    Load the pre-trained satellite detection model.
-
-    Args:
-        model_path (str): Path to the detection model.
-        device (torch.device): Device to load the model onto.
-
-    Returns:
-        torch.nn.Module: The detection model.
-    """
-    detection_model = BinaryClassificationCNN(input_channels=3)
-    detection_model.load_state_dict(torch.load(model_path, map_location=device))
-    detection_model.eval()
-    detection_model.to(device)
-    return detection_model
-
 def set_clip_trail(value):
     global GLOBAL_CLIP_TRAIL
     GLOBAL_CLIP_TRAIL = value
@@ -991,7 +1097,7 @@ def set_clip_trail(value):
 
 
 # Function to satellite the image
-def satellite_image(image_path, device, detection_model, removal_model, satellite_mode='luminance', sensitivity=0.1, progress_signal=None, log_signal=None, is_onnx=False):
+def satellite_image(image_path, device, detection_model1, detection_model2, removal_model, satellite_mode='luminance', sensitivity=0.1, progress_signal=None, log_signal=None, is_onnx=False):
     def log_message(message):
         print(message)  # Always log to console
         if log_signal:
@@ -1230,9 +1336,15 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         if satellite_mode == 'luminance' and is_mono:
             # Extract luminance (single-channel processing for mono)
             satellited_image, trail_detected_in_image = satellite_channel(
-                stretched_image[:, :, 0], device, removal_model, detection_model, 
-                is_mono=True, sensitivity=sensitivity,  
-                progress_signal=progress_signal, is_onnx=is_onnx
+                image=stretched_image,
+                device=device,
+                removal_model=removal_model,
+                detection_model1=detection_model1,
+                detection_model2=detection_model2,
+                is_mono=is_mono,
+                sensitivity=sensitivity,
+                progress_signal=progress_signal,
+                is_onnx=is_onnx
             )
             satellited_image = satellited_image[:, :, np.newaxis]  # Convert back to single channel
 
@@ -1240,18 +1352,30 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
             # Extract luminance and process only that channel
             luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
             satellited_image, trail_detected_in_image = satellite_channel(
-                luminance, device, removal_model, detection_model, 
-                is_mono=True, sensitivity=sensitivity, 
-                progress_signal=progress_signal, is_onnx=is_onnx
+                image=stretched_image,
+                device=device,
+                removal_model=removal_model,
+                detection_model1=detection_model1,
+                detection_model2=detection_model2,
+                is_mono=is_mono,
+                sensitivity=sensitivity,
+                progress_signal=progress_signal,
+                is_onnx=is_onnx
             )
             satellited_image = merge_luminance(satellited_image, cb_channel, cr_channel)
 
         else:  # Full RGB denoising mode
             # Process the 3-channel image directly
             satellited_image, trail_detected_in_image = satellite_channel(
-                stretched_image, device, removal_model, detection_model, 
-                is_mono=False, sensitivity=sensitivity, 
-                progress_signal=progress_signal, is_onnx=is_onnx
+                image=stretched_image,
+                device=device,
+                removal_model=removal_model,
+                detection_model1=detection_model1,
+                detection_model2=detection_model2,
+                is_mono=is_mono,
+                sensitivity=sensitivity,
+                progress_signal=progress_signal,
+                is_onnx=is_onnx
             )
 
         # Handle skipping saving if no trail detected
@@ -1283,7 +1407,17 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
 
  
-def satellite_channel(image, device, removal_model, detection_model, is_mono=False, sensitivity=0.1, progress_signal=None, is_onnx=False):
+def satellite_channel(
+    image,
+    device,
+    removal_model,
+    detection_model1,
+    detection_model2,
+    is_mono=False,
+    sensitivity=0.1,
+    progress_signal=None,
+    is_onnx=False
+):
     chunk_size = 256
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(image, chunk_size=chunk_size, overlap=overlap)
@@ -1297,9 +1431,9 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
 
         # Detection
         if is_onnx:
-            trail_detected = contains_trail_with_onnx(chunk, detection_model)
+            trail_detected = contains_trail_with_onnx(chunk, detection_model1)  # Modify if needed for ONNX
         else:
-            trail_detected = contains_trail_with_ai(chunk, detection_model, device)
+            trail_detected = contains_trail_with_ai(chunk, detection_model1, detection_model2, device)
 
         if trail_detected:
             trail_detected_in_image = True  # Set the flag if any chunk contains a trail
@@ -1339,6 +1473,7 @@ def satellite_channel(image, device, removal_model, detection_model, is_mono=Fal
 
 
 
+
 def contains_trail_with_onnx(chunk, detection_model):
     resized_chunk = resize(chunk, (256, 256, chunk.shape[2]), mode='reflect', anti_aliasing=True)
     input_tensor = np.transpose(resized_chunk, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
@@ -1352,30 +1487,39 @@ def run_onnx_removal(chunk_tensor, removal_model, original_shape):
 
 
 
-# Function to detect satellite trails in a chunk using the detection AI
-def contains_trail_with_ai(chunk, detection_model, device):
+def contains_trail_with_ai(chunk, detection_model1, detection_model2, device):
     """
-    Detect satellite trails in a chunk using the detection model.
+    Detect satellite trails in a chunk using two detection models.
 
     Args:
         chunk (numpy.ndarray): Image chunk to analyze.
-        detection_model (torch.nn.Module): Pre-trained detection model.
-        device (torch.device): Device to run the model on.
+        detection_model1 (torch.nn.Module): Primary pre-trained detection model.
+        detection_model2 (torch.nn.Module): Secondary pre-trained detection model.
+        device (torch.device): Device to run the models on.
 
     Returns:
-        bool: True if a trail is detected, False otherwise.
+        bool: True if a trail is detected by both models, False otherwise.
     """
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Resize((256, 256)),  # Ensure input size matches the model
+        transforms.Resize((256, 256)),  # Ensure input size matches the models
     ])
     input_tensor = transform(chunk).unsqueeze(0).to(device)
 
-    # Run the detection model
+    # Run the primary detection model
     with torch.no_grad():
-        output = detection_model(input_tensor).item()
+        output1 = detection_model1(input_tensor).item()
 
-    return output > 0.5  # Return True if trail is detected (output > 0.5)
+    if output1 > 0.5:
+        # If primary model detects a trail, run the secondary model
+        with torch.no_grad():
+            output2 = detection_model2(input_tensor).item()
+        # Both models must detect a trail
+        return output2 > 0.5
+    else:
+        # Primary model did not detect a trail; skip secondary model
+        return False
+
 
 def run_torch_removal(chunk_tensor, removal_model):
     with torch.no_grad():
@@ -1633,14 +1777,17 @@ class BatchProcessor(QThread):
                     satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta, trail_detected_in_image = satellite_image(
                         image_path,
                         self.models['device'],
-                        self.models["detection_model"],
+                        self.models["detection_model1"],  # Primary detection model
+                        self.models["detection_model2"],  # Secondary detection model
                         self.models["removal_model"],
                         self.satellite_mode,
                         sensitivity=self.sensitivity,  # Pass sensitivity
                         log_signal=self.log_signal,
-                        progress_signal=self.progress_signal,  # Pass chunk-level progress
+                        progress_signal=self.progress_signal,
                         is_onnx=self.is_onnx
                     )
+
+
 
                     # Handle the case where no trail was detected
                     if satellited_image is None:  # Handle cases where image processing failed entirely
@@ -1721,10 +1868,16 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, choices=["full", "luminance"], default="full", help="Satellite removal mode: 'full' or 'luminance'.")
     parser.add_argument("--batch", action="store_true", help="Enable batch processing mode for the input directory.")
     parser.add_argument("--monitor", action="store_true", help="Enable live folder monitoring for new files.")
-    parser.add_argument("--clip-trail", action="store_true", default=True, help="Clip satellite trail to 0.000 after processing.")
     parser.add_argument("--skip-save", action="store_true", default=False, help="Skip saving images if no satellite trail is detected.")
-    parser.add_argument("--sensitivity", type=float, default=0.1, help="Sensitivity for clip trail logic (0.01 to 0.5).")  # New argument                    
+    parser.add_argument("--sensitivity", type=float, default=0.1, help="Sensitivity for clip trail logic (0.01 to 0.5).")  # New argument
 
+    # Introduce a mutually exclusive group for clipping
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--clip-trail", action="store_true", help="Clip satellite trail to 0.000 after processing.")
+    group.add_argument("--no-clip-trail", action="store_false", dest="clip_trail", help="Do not clip satellite trail to 0.000 after processing.")
+
+    # Set default for clip_trail
+    parser.set_defaults(clip_trail=True)  # Default behavior is to clip
 
     args = parser.parse_args()
 
@@ -1733,7 +1886,6 @@ if __name__ == "__main__":
         parser.error("The --sensitivity value must be between 0.01 and 0.5.")    
 
     # Declare global before assignment
-
     GLOBAL_CLIP_TRAIL = args.clip_trail  # Update based on the parsed argument
     GLOBAL_SKIP_SAVE = args.skip_save 
     GLOBAL_SENSITIVITY = args.sensitivity   
