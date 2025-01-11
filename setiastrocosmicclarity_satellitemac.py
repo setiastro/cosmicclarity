@@ -1,7 +1,7 @@
 # PyQt5 Imports
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-    QComboBox, QPushButton, QCheckBox, QFileDialog, QLineEdit, QTextEdit, QStyle, QProgressBar
+    QComboBox, QPushButton, QCheckBox, QFileDialog, QLineEdit, QTextEdit, QStyle, QProgressBar, QSlider
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
@@ -28,88 +28,194 @@ from torchvision import models, transforms
 from torchvision.models import ResNet18_Weights
 import lz4.block
 import zstandard
-
+from torchvision.models import MobileNet_V2_Weights
 import torch.sparse
 import torch._C
+import onnxruntime as ort
 
+import rawpy
+
+#torch.cuda.is_available = lambda: False
 
 # Custom Imports
 from xisf import XISF
+from skimage.transform import resize
 
+#import argparse  # For command-line argument parsing
 
-import argparse  # For command-line argument parsing
+GLOBAL_CLIP_TRAIL = True  # Default to False
+GLOBAL_SKIP_SAVE = False
 
-GLOBAL_CLIP_TRAIL = False  # Default to False
+class BinaryClassificationCNN2(nn.Module):
+    def __init__(self, input_channels=3):
+        super(BinaryClassificationCNN2, self).__init__()
+        
+        # ---------------------------------------------------------
+        # (A) Two initial "custom" convolutional layers
+        # ---------------------------------------------------------
+        # First custom convolutional layer
+        self.pre_conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+        
+        # Second custom convolutional layer
+        self.pre_conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
+        
+        # ---------------------------------------------------------
+        # (B) MobileNetV2 backbone
+        # ---------------------------------------------------------
+        # Load pretrained MobileNetV2
+        self.mobilenet = models.mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
 
-# Binary Classification Model (Satellite Detection Model)
+        # By default, MobileNetV2 expects (N, 3, H, W). But after our pre_conv2, we have 64 channels. 
+        # We need to override MobileNetV2's first convolution to handle 64 -> 32.
+        # mobilenet.features[0] is a Sequential of (Conv2d, BatchNorm2d, ReLU6).
+        # So we replace the *first Conv2d* layer to accept 64 channels:
+        self.mobilenet.features[0][0] = nn.Conv2d(
+            in_channels=64,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False
+        )
+
+        # ---------------------------------------------------------
+        # (C) Replace the final classification layer
+        # ---------------------------------------------------------
+        # The final classifier (mobilenet.classifier) is typically:
+        #   (Dropout(...), Linear(in_features=1280, out_features=1000, ...))
+        # We want just 1 output for binary classification.
+        in_features = self.mobilenet.classifier[-1].in_features
+        self.mobilenet.classifier[-1] = nn.Linear(in_features, 1)
+        
+    def forward(self, x):
+        # Pass input through your custom convolutional layers
+        x = self.pre_conv1(x)   # => shape (N, 32, H, W)
+        x = self.pre_conv2(x)   # => shape (N, 64, H, W)
+        
+        # Pass through MobileNetV2 backbone (which now starts with a 64->32 conv)
+        x = self.mobilenet(x)
+        
+        return x
+
+# Define the Binary Classification Model
 class BinaryClassificationCNN(nn.Module):
     def __init__(self, input_channels=3):
         super(BinaryClassificationCNN, self).__init__()
+        
+        # First custom convolutional layer
+        self.pre_conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+        
+        # Second custom convolutional layer
+        self.pre_conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
+        
+        # ResNet18 backbone
         self.features = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        self.features.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.features.fc = nn.Linear(self.features.fc.in_features, 1)  # Single output for binary classification
-        self.sigmoid = nn.Sigmoid()
-
+        
+        # Replace the first layer of ResNet18 to match our second custom conv layer
+        self.features.conv1 = nn.Conv2d(64, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
+        # Replace the fully connected layer for binary classification
+        self.features.fc = nn.Linear(self.features.fc.in_features, 1)
+        
     def forward(self, x):
+        # Pass input through custom convolutional layers
+        x = self.pre_conv1(x)
+        x = self.pre_conv2(x)
+        
+        # Pass through ResNet18 backbone
         x = self.features(x)
-        x = self.sigmoid(x)
+        
         return x
 
 
+# Define the ResidualBlock
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+    
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out += residual
+        out = self.relu(out)
+        return out
 
+# Updated SharpeningCNN with Residual Blocks
 class SharpeningCNN(nn.Module):
     def __init__(self):
         super(SharpeningCNN, self).__init__()
         
         # Encoder (down-sampling path)
         self.encoder1 = nn.Sequential(
-            nn.Conv2d(3, 8, kernel_size=3, padding=1),  # 1st layer (3 -> 8 feature maps)
+            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
             nn.ReLU(),
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),  # 2nd layer (8 -> 16 feature maps)
-            nn.ReLU(),
-            nn.Conv2d(16, 16, kernel_size=3, padding=1),  # Additional layer (16 -> 16)
-            nn.ReLU()
+            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (16 -> 32)
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (32 -> 32)
-            nn.ReLU()
+            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (32 -> 64)
+            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (64 -> 64)
-            nn.ReLU()
+            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.encoder4 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, padding=2, dilation=2),  # Dilated convolution (64 -> 128)
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
             nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=2, dilation=2),  # Additional dilated layer (128 -> 128)
-            nn.ReLU()
+            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
+        )
+        self.encoder5 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2),  # 5th layer (128 -> 256) with dilation
+            nn.ReLU(),
+            ResidualBlock(256)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         
         # Decoder (up-sampling path with skip connections)
-        self.decoder4 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # Combine with encoder3 output
+        self.decoder5 = nn.Sequential(
+            nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1),  # 256 + 128 feature maps from encoder4
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
+        )
+        self.decoder4 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # 128 + 64 feature maps from encoder3
+            nn.ReLU(),
+            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder3 = nn.Sequential(
-            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # Combine with encoder2 output
+            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),  # Additional layer
-            nn.ReLU()
+            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder2 = nn.Sequential(
-            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # Combine with encoder1 output
+            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
             nn.ReLU(),
-            nn.Conv2d(16, 8, kernel_size=3, padding=1),  # Additional layer (16 -> 8 feature maps)
-            nn.ReLU()
+            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
         )
         self.decoder1 = nn.Sequential(
-            nn.Conv2d(8, 3, kernel_size=3, padding=1),  # Output layer (8 -> 3 channels for RGB output)
+            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
             nn.Sigmoid()  # Ensure output values are between 0 and 1
         )
 
@@ -118,12 +224,14 @@ class SharpeningCNN(nn.Module):
         e1 = self.encoder1(x)  # First encoding block
         e2 = self.encoder2(e1)  # Second encoding block
         e3 = self.encoder3(e2)  # Third encoding block
-        e4 = self.encoder4(e3)  # Fourth encoding block (128 feature maps with dilation)
-
+        e4 = self.encoder4(e3)  # Fourth encoding block
+        e5 = self.encoder5(e4)  # Fifth encoding block
+        
         # Decoder with skip connections
-        d4 = self.decoder4(torch.cat([e4, e3], dim=1))  # Combine with encoder3 output
-        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Combine with encoder2 output
-        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Combine with encoder1 output
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
         d1 = self.decoder1(d2)  # Final output layer
 
         return d1
@@ -135,43 +243,92 @@ exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else 
 cached_models = None
 
 def load_models(exe_dir, use_gpu=True):
+    """
+    Load models with support for MPS (macOS) and CPU fallback.
+
+    Args:
+        exe_dir (str): Path to the executable directory.
+        use_gpu (bool): Whether to use GPU acceleration.
+
+    Returns:
+        dict: A dictionary containing the loaded models and their configurations.
+    """
     global cached_models
+    device = None
+
     if cached_models:
         return cached_models
 
-    # Use MPS for macOS if GPU support is enabled and MPS is available
-    device = torch.device("mps") if use_gpu and torch.backends.mps.is_available() else torch.device("cpu")
-    print(f"Using device: {device}")
+    # Check for MPS on macOS
+    if torch.backends.mps.is_available() and use_gpu:
+        print("Using device: MPS (Metal Performance Shaders)")
+        device = torch.device("mps")
 
-    # Load detection model
-    detection_model = BinaryClassificationCNN(input_channels=3)
-    detection_model.load_state_dict(
-        torch.load(
-            os.path.join(exe_dir, "satellite_trail_detector.pth"),
-            map_location=device,
-            weights_only=True
+        # Load PyTorch detection model
+        detection_model1 = BinaryClassificationCNN(input_channels=3).to(device)
+        detection_model1.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"), map_location=device)
         )
-    )
-    detection_model.eval().to(device)
+        detection_model1.eval().to(device)
 
-    # Load removal model
-    removal_model = SharpeningCNN()
-    removal_model.load_state_dict(
-        torch.load(
-            os.path.join(exe_dir, "satelliteremoval128featuremaps.pth"),
-            map_location=device,
-            weights_only=True
+        detection_model2 = BinaryClassificationCNN2(input_channels=3).to(device)
+        detection_model2.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satellite_trail_detector_mobilenetv2.pth"), map_location=device)
         )
-    )
-    removal_model.eval().to(device)
+        detection_model2.eval().to(device)        
 
-    # Cache the loaded models and device
-    cached_models = {
-        "detection_model": detection_model,
-        "removal_model": removal_model,
-        "device": device
-    }
-    return cached_models
+        # Load PyTorch removal model
+        removal_model = SharpeningCNN().to(device)
+        removal_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satelliteremovalAI3.pth"), map_location=device)
+        )
+        removal_model.eval().to(device)
+
+        # Cache and return models
+        cached_models = {
+            "detection_model1": detection_model1,
+            "detection_model2": detection_model2,
+            "removal_model": removal_model,
+            "device": device,
+            "is_onnx": False,
+        }
+        return cached_models
+
+    else:
+        # CPU fallback
+        print("Using device: CPU (PyTorch)")
+        device = torch.device("cpu")
+
+        # Load PyTorch detection model
+        detection_model1 = BinaryClassificationCNN(input_channels=3).to(device)
+        detection_model1.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satellite_trail_detector_AI3.pth"), map_location=device)
+        )
+        detection_model1.eval().to(device)
+
+        # Load PyTorch detection model
+        detection_model2 = BinaryClassificationCNN2(input_channels=3).to(device)
+        detection_model2.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satellite_trail_detector_mobilenetv2.pth"), map_location=device)
+        )
+        detection_model2.eval().to(device)        
+
+        # Load PyTorch removal model
+        removal_model = SharpeningCNN().to(device)
+        removal_model.load_state_dict(
+            torch.load(os.path.join(exe_dir, "satelliteremovalAI3.pth"), map_location=device)
+        )
+        removal_model.eval().to(device)
+
+        # Cache and return models
+        cached_models = {
+            "detection_model1": detection_model1,
+            "detection_model2": detection_model2,
+            "removal_model": removal_model,
+            "device": device,
+            "is_onnx": False,
+        }
+        return cached_models
 
 
 
@@ -285,14 +442,18 @@ class FolderMonitor(QThread):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(float)
 
-    def __init__(self, input_dir, output_dir, models, satellite_mode):
+    def __init__(self, input_dir, output_dir, models, satellite_mode, clip_trail=None, skip_save=None, sensitivity=0.1):
         super().__init__()
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.models = models
         self.satellite_mode = satellite_mode
         self.running = True
+        self.is_onnx = models.get("is_onnx", False)
         self.processed_files = set()  # Initialize processed files list
+        self.clip_trail = clip_trail if clip_trail is not None else GLOBAL_CLIP_TRAIL  # Use the provided or global variable
+        self.skip_save = skip_save if skip_save is not None else GLOBAL_SKIP_SAVE
+        self.sensitivity = sensitivity  # Store the sensitivity value
 
     def log_message(self, message):
         """Log a message using the provided signal or print to the console."""
@@ -306,9 +467,10 @@ class FolderMonitor(QThread):
 
     def run(self):
         # Initialize processed files with the current files in the folder
+        self.log_message("Live monitoring started...")
         self.processed_files = set([
             f for f in os.listdir(self.input_dir)
-            if f.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf'))
+            if f.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef'))
         ])
 
         while self.running:
@@ -316,7 +478,7 @@ class FolderMonitor(QThread):
                 # List all eligible files in the input directory
                 files = [
                     f for f in os.listdir(self.input_dir)
-                    if f.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf'))
+                    if f.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef'))
                 ]
                 # Filter for files that haven't been processed yet
                 new_files = [f for f in files if f not in self.processed_files]
@@ -324,48 +486,66 @@ class FolderMonitor(QThread):
                 for new_file in new_files:
                     # Skip files with the "_satellited" suffix to avoid reprocessing
                     if "_satellited" in new_file:
+                        self.processed_files.add(new_file)
                         continue
 
                     file_path = os.path.join(self.input_dir, new_file)
                     self.log_signal.emit(f"Detected new file: {new_file}")
-                    
+
                     # Add a 5-second delay before processing
                     self.log_signal.emit(f"Waiting 5 seconds to ensure the file is fully saved...")
                     time.sleep(5)
 
                     try:
                         # Process the new file
-                        satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta = satellite_image(
+                        satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta, trail_detected_in_image = satellite_image(
                             file_path,
                             self.models['device'],
-                            self.models['detection_model'],
+                            self.models['detection_model1'],  # Primary detection model
+                            self.models['detection_model2'],  # Secondary detection model
                             self.models['removal_model'],
                             self.satellite_mode,
+                            sensitivity=self.sensitivity,  # Pass sensitivity
                             log_signal=self.log_signal,
-                            progress_signal=self.progress_signal
+                            progress_signal=self.progress_signal,
+                            is_onnx=self.is_onnx
                         )
-                        if satellited_image is not None:
-                            output_image_name = os.path.splitext(new_file)[0] + "_satellited" + file_extension
-                            output_file = os.path.join(self.output_dir, output_image_name)
-                            save_processed_image(
-                                satellited_image,
-                                output_file,
-                                file_extension,
-                                bit_depth,
-                                original_header,
-                                is_mono,
-                                file_meta
-                            )
-                            self.log_signal.emit(f"Processed and saved: {output_image_name}")
 
-                        else:
+
+                        # Handle the Skip Save logic based on trail detection and user preference
+                        if not trail_detected_in_image and self.skip_save:
+                            self.log_signal.emit(f"Skipped: No satellite trail detected in {new_file}")
+                            self.processed_files.add(new_file)
+                            continue
+
+                        if satellited_image is None:  # This case should not occur due to checks in satellite_image
                             self.log_signal.emit(f"Failed to process: {new_file}")
-                        
-                        # Mark both input and output files as processed
-                        self.processed_files.add(new_file)
+                            self.processed_files.add(new_file)
+                            continue
+
+                        # Save the processed image
+                        output_image_name = os.path.splitext(new_file)[0] + "_satellited" + file_extension
+                        output_file = os.path.join(self.output_dir, output_image_name)
+                        save_processed_image(
+                            satellited_image,
+                            output_file,
+                            file_extension,
+                            bit_depth,
+                            original_header,
+                            is_mono,
+                            file_meta,
+                            image_meta
+                        )
+                        self.log_signal.emit(f"Processed and saved: {output_image_name}")
+
+                        # Mark the output file as processed
                         self.processed_files.add(output_image_name)
+
                     except Exception as e:
                         self.log_signal.emit(f"Error processing file {new_file}: {e}")
+
+                    # Mark the input file as processed
+                    self.processed_files.add(new_file)
 
                 time.sleep(2)  # Add a short delay to avoid rapid file checks
             except Exception as e:
@@ -377,7 +557,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V1.1.1")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.3 AI3")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -398,8 +578,7 @@ class SatelliteToolDialog(QDialog):
         self.models = None
         self.live_monitor_thread = None       
         self.log_signal.connect(self.log_message)
-
-                
+        self.sensitivity = 0.1  # Default value               
  
 
         # Main layout
@@ -456,9 +635,33 @@ class SatelliteToolDialog(QDialog):
 
         # Add "Clip Satellite Trail" checkbox
         self.clip_trail_checkbox = QCheckBox("Clip Satellite Trail to 0.000")
-        self.clip_trail_checkbox.setChecked(False)  # Default unchecked
+        self.clip_trail_checkbox.setChecked(True)  # Default unchecked
         self.clip_trail_checkbox.stateChanged.connect(self.update_clip_trail)
         layout.addWidget(self.clip_trail_checkbox)
+
+        # Sensitivity Slider
+        sensitivity_layout = QHBoxLayout()
+        sensitivity_label = QLabel("Clipping Sensitivity (Smaller Value more aggressive clipping):")
+        self.sensitivity_value_label = QLabel(f"{self.sensitivity:.2f}")
+        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider.setMinimum(1)   # Represents 0.01
+        self.sensitivity_slider.setMaximum(50)  # Represents 0.5
+        self.sensitivity_slider.setValue(int(self.sensitivity * 100))  # e.g., 0.1 * 100 = 10
+        self.sensitivity_slider.setTickInterval(1)
+        self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
+        self.sensitivity_slider.valueChanged.connect(self.update_sensitivity)
+
+        sensitivity_layout.addWidget(sensitivity_label)
+        sensitivity_layout.addWidget(self.sensitivity_slider)
+        sensitivity_layout.addWidget(self.sensitivity_value_label)
+        layout.addLayout(sensitivity_layout)        
+
+        # Add "Skip Saving if No Trail Detected" checkbox
+        self.skip_save_checkbox = QCheckBox("Skip Saving if No Trail Detected")
+        self.skip_save_checkbox.setChecked(False)  # Default to not skipping
+        self.skip_save_checkbox.stateChanged.connect(self.update_skip_save)
+        layout.addWidget(self.skip_save_checkbox)
+
 
         # Control buttons
         self.process_button = QPushButton("Batch Process Input Folder")
@@ -496,6 +699,17 @@ class SatelliteToolDialog(QDialog):
         layout.addWidget(footer_label)
 
         self.setLayout(layout)
+
+    def update_sensitivity(self, value):
+        """
+        Update the sensitivity value based on the slider position.
+        """
+        self.sensitivity = value / 100.0  # Convert integer back to float (0.01 to 0.5)
+        self.sensitivity_value_label.setText(f"{self.sensitivity:.2f}")
+
+    def update_skip_save(self, state):
+        global GLOBAL_SKIP_SAVE
+        GLOBAL_SKIP_SAVE = state == Qt.Checked
 
     def update_clip_trail(self, state):
         set_clip_trail(state == Qt.Checked)
@@ -541,14 +755,20 @@ class SatelliteToolDialog(QDialog):
         satellite_mode = self.mode_dropdown.currentText()
 
         self.live_monitor_thread = FolderMonitor(
-            self.input_dir,
-            self.output_dir,
-            self.models,
-            satellite_mode
+            input_dir=self.input_dir,
+            output_dir=self.output_dir,
+            models=self.models,
+            satellite_mode=satellite_mode,
+            clip_trail=self.clip_trail_checkbox.isChecked(),
+            skip_save=self.skip_save_checkbox.isChecked(),
+            sensitivity=self.sensitivity
         )
         self.live_monitor_thread.log_signal.connect(self.log_message)
         self.live_monitor_thread.progress_signal.connect(self.update_progress_bar)
         self.live_monitor_thread.start()
+
+        self.sensitivity_slider.setEnabled(False)
+        self.log_message("Sensitivity slider disabled during live monitoring.")
 
         self.live_monitor_button.setEnabled(False)
         self.stop_monitor_button.setEnabled(True)
@@ -560,6 +780,9 @@ class SatelliteToolDialog(QDialog):
             self.live_monitor_button.setEnabled(True)
             self.stop_monitor_button.setEnabled(False)
             self.log_message("Live monitor stopped.")
+            # **Re-enable the sensitivity slider**
+            self.sensitivity_slider.setEnabled(True)
+            self.log_message("Sensitivity slider re-enabled after stopping live monitoring.")            
 
     def process_input_folder(self):
         """Start batch processing in a separate thread."""
@@ -576,10 +799,13 @@ class SatelliteToolDialog(QDialog):
 
         # Create and start the batch processing thread
         self.batch_processor = BatchProcessor(
-            self.input_dir,
-            self.output_dir,
-            self.models,
-            self.mode_dropdown.currentText()
+            input_dir=self.input_dir,
+            output_dir=self.output_dir,
+            models=self.models,
+            satellite_mode=self.mode_dropdown.currentText(),
+            clip_trail=self.clip_trail_checkbox.isChecked(),
+            skip_save=self.skip_save_checkbox.isChecked(),
+            sensitivity=self.sensitivity
         )
         self.batch_processor.log_signal.connect(self.log_message)
         self.batch_processor.progress_signal.connect(self.update_progress_bar)
@@ -643,50 +869,78 @@ def replace_border(original_image, processed_image, border_size=16):
 # Function to stretch an image
 def stretch_image(image):
     """
-    Perform a linear stretch on the image (unlinked for RGB).
+    Perform a linear stretch on the image with unlinked channels for all images.
     """
-    original_min = np.min(image, axis=(0, 1)) if image.ndim == 3 else np.min(image)
+    original_min = np.min(image)
     stretched_image = image - original_min  # Shift image so that the min is 0
+
+    # Capture the original medians before any further processing
+    original_medians = []
+    for c in range(3):  # Assume 3-channel input
+        channel_median = np.median(stretched_image[..., c])
+        original_medians.append(channel_median)
+
+    # Define the target median for stretching
     target_median = 0.25
 
-    if image.ndim == 3:  # RGB image case
-        # Stretch each channel independently
-        original_medians = np.median(stretched_image, axis=(0, 1))
-        stretched_image = np.array([
-            ((median - 1) * target_median * stretched_image[..., c]) / (
-                median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
-            ) for c, median in enumerate(original_medians)
-        ]).transpose(1, 2, 0)
-    else:  # Grayscale image case
-        original_medians = np.median(stretched_image)
-        stretched_image = ((original_medians - 1) * target_median * stretched_image) / (
-            original_medians * (target_median + stretched_image - 1) - target_median * stretched_image
-        )
+    # Apply the stretch for each channel
+    for c in range(3):
+        channel_median = original_medians[c]
+        if channel_median != 0:
+            stretched_image[..., c] = ((channel_median - 1) * target_median * stretched_image[..., c]) / (
+                channel_median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+            )
 
-    stretched_image = np.clip(stretched_image, 0, 1)  # Clip to [0, 1] range
+    # Clip stretched image to [0, 1] range
+    stretched_image = np.clip(stretched_image, 0, 1)
+
+    # Return the stretched image, original min, and original medians
     return stretched_image, original_min, original_medians
 
-# Function to unstretch an image with final median adjustment
+
+
+# Function to unstretch an image
 def unstretch_image(image, original_medians, original_min):
     """
-    Undo the stretch to return the image to the original linear state (unlinked for RGB).
+    Undo the stretch to return the image to the original linear state with unlinked channels.
+    Handles both single-channel and 3-channel images.
     """
-    if image.ndim == 3:  # RGB image case
-        # Unstretch each channel independently
-        unstretched_image = np.array([
-            ((median - 1) * original_medians[c] * image[..., c]) / (
-                median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
-            ) for c, median in enumerate(np.median(image, axis=(0, 1)))
-        ]).transpose(1, 2, 0)
-    else:  # Grayscale image case
-        median = np.median(image)
-        unstretched_image = ((median - 1) * original_medians * image) / (
-            median * (original_medians + image - 1) - original_medians * image
-        )
+    was_single_channel = False  # Local flag to check if the image was originally mono
 
-    unstretched_image += original_min  # Add back the original minimum
-    unstretched_image = np.clip(unstretched_image, 0, 1)  # Clip to [0, 1] range
-    return unstretched_image
+
+
+    # Check if the image is single-channel
+    if image.ndim == 3 and image.shape[2] == 1:
+        was_single_channel = True  # Mark the image as originally single-channel
+        image = np.repeat(image, 3, axis=2)  # Convert to 3-channel by duplicating
+
+    elif image.ndim == 2:  # True single-channel case
+        was_single_channel = True
+        image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+    # Process each channel independently
+    for c in range(3):  # Assume 3-channel input at this point
+        channel_median = np.median(image[..., c])
+        if channel_median != 0 and original_medians[c] != 0:
+
+            image[..., c] = ((channel_median - 1) * original_medians[c] * image[..., c]) / (
+                channel_median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+            )
+
+        else:
+            print(f"Channel {c} - Skipping unstretch due to zero median.")
+
+    image += original_min  # Add back the original minimum
+    image = np.clip(image, 0, 1)  # Clip to [0, 1] range
+
+    # If the image was originally single-channel, convert back to single-channel
+    if was_single_channel:
+        image = np.mean(image, axis=2, keepdims=True)  # Convert back to single-channel
+
+
+
+    return image
+
 
 
 # Function to add a border of median value around the image
@@ -704,24 +958,6 @@ def remove_border(image, border_size=5):
     else:
         return image[border_size:-border_size, border_size:-border_size, :]
 
-# Function to load the satellite detection model
-def load_detection_model(model_path, device):
-    """
-    Load the pre-trained satellite detection model.
-
-    Args:
-        model_path (str): Path to the detection model.
-        device (torch.device): Device to load the model onto.
-
-    Returns:
-        torch.nn.Module: The detection model.
-    """
-    detection_model = BinaryClassificationCNN(input_channels=3)
-    detection_model.load_state_dict(torch.load(model_path, map_location=device))
-    detection_model.eval()
-    detection_model.to(device)
-    return detection_model
-
 def set_clip_trail(value):
     global GLOBAL_CLIP_TRAIL
     GLOBAL_CLIP_TRAIL = value
@@ -730,7 +966,7 @@ def set_clip_trail(value):
 
 
 # Function to satellite the image
-def satellite_image(image_path, device, detection_model, removal_model, satellite_mode='luminance', progress_signal=None, log_signal=None):
+def satellite_image(image_path, device, detection_model1, detection_model2, removal_model, satellite_mode='luminance', sensitivity=0.1, progress_signal=None, log_signal=None, is_onnx=False):
     def log_message(message):
         print(message)  # Always log to console
         if log_signal:
@@ -742,9 +978,9 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
-    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef', 'jpg', 'jpeg']:
         print(f"Ignoring non-image file: {image_path}")
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
     original_header = None
     image = None
@@ -823,6 +1059,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
                         # Normalize the image data to the range [0, 1]
                         image = (image - image_min) / (image_max - image_min)
+                        image = image.astype(np.float32)
                         print(f"Image range after applying BZERO and BSCALE (3D case): min={image_min}, max={image_max}")
 
                     is_mono = False  # RGB data
@@ -845,6 +1082,7 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
                         # Normalize the image data to the range [0, 1]
                         image = (image - image_min) / (image_max - image_min)
+                        image = image.astype(np.float32)
                         print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
 
                     elif bit_depth == "32-bit floating point":
@@ -881,6 +1119,53 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
             print(f"Loaded XISF image with bit depth: {bit_depth}, Mono: {is_mono}")
 
+        elif file_extension in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
+            try:
+                with rawpy.imread(image_path) as raw:
+                    # Get the raw Bayer data
+                    bayer_image = raw.raw_image_visible.astype(np.float32)
+                    print(f"Raw Bayer image dtype: {bayer_image.dtype}, min: {bayer_image.min()}, max: {bayer_image.max()}")
+
+                    # Normalize Bayer data to [0, 1]
+                    bayer_image /= bayer_image.max()
+                    print(f"Normalized Bayer image min: {bayer_image.min()}, max: {bayer_image.max()}")
+
+                    # Convert Bayer data to a 3D array (for consistency with your pipeline)
+                    image = np.stack([bayer_image] * 3, axis=-1)
+                    bit_depth = "16-bit"  # Assuming 16-bit raw data
+                    is_mono = True
+
+                    # Populate `original_header` with RAW metadata
+                    original_header_dict = {
+                        'CAMERA': raw.camera_whitebalance[0] if raw.camera_whitebalance else 'Unknown',
+                        'EXPTIME': raw.shutter if hasattr(raw, 'shutter') else 0.0,
+                        'ISO': raw.iso_speed if hasattr(raw, 'iso_speed') else 0,
+                        'FOCAL': raw.focal_len if hasattr(raw, 'focal_len') else 0.0,
+                        'DATE': raw.timestamp if hasattr(raw, 'timestamp') else 'Unknown',
+                    }
+
+                    # Extract CFA pattern
+                    cfa_pattern = raw.raw_colors_visible
+                    cfa_mapping = {
+                        0: 'R',  # Red
+                        1: 'G',  # Green
+                        2: 'B',  # Blue
+                    }
+                    cfa_description = ''.join([cfa_mapping.get(color, '?') for color in cfa_pattern.flatten()[:4]])
+
+                    # Add CFA pattern to header
+                    original_header_dict['CFA'] = (cfa_description, 'Color Filter Array pattern')
+
+                    # Convert original_header_dict to fits.Header
+                    original_header = fits.Header()
+                    for key, value in original_header_dict.items():
+                        original_header[key] = value
+
+            except Exception as e:
+                print(f"Error reading RAW file: {image_path}, {e}")
+                return None, None, None, None, None, None, None, None
+        
+
 
         else:  # Assume 8-bit PNG
             image = np.array(Image.open(image_path).convert('RGB')).astype(np.float32) / 255.0
@@ -894,18 +1179,23 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         original_image=image
 
         # Add a border around the image with the median value
+
         image_with_border = image #add_border(image, border_size=16)
 
-        # Check if the image needs stretching based on its median value
-        stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.08
-        original_median = np.median(image_with_border)
+        #check if stretch is needed
+        stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.05
+        
         if stretch_needed:
-            stretched_image, original_min, original_median = stretch_image(image_with_border)
+            print(f"Normalizing Linear Data")
+            # Stretch the image
+            stretched_image, original_min, original_medians = stretch_image(image_with_border)
         else:
+            # If no stretch is needed, use the original image directly
             stretched_image = image_with_border
-            original_min = None
+            original_min = np.min(image_with_border)
+            original_medians = [np.median(image_with_border[..., c]) for c in range(3)] if image_with_border.ndim == 3 else [np.median(image_with_border)]
 
-        assert stretched_image.dtype == np.float32, f"Image dtype is {stretched_image.dtype}, expected np.float32"
+        
 
         # Process mono or color images
         if is_mono:
@@ -914,34 +1204,63 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
 
         if satellite_mode == 'luminance' and is_mono:
             # Extract luminance (single-channel processing for mono)
-            satellited_image = satellite_channel(
-                stretched_image[:, :, 0], device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal
+            satellited_image, trail_detected_in_image = satellite_channel(
+                image=stretched_image,
+                device=device,
+                removal_model=removal_model,
+                detection_model1=detection_model1,
+                detection_model2=detection_model2,
+                is_mono=is_mono,
+                sensitivity=sensitivity,
+                progress_signal=progress_signal,
+                is_onnx=is_onnx
             )
             satellited_image = satellited_image[:, :, np.newaxis]  # Convert back to single channel
 
         elif satellite_mode == 'luminance' and not is_mono:
             # Extract luminance and process only that channel
             luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
-            satellited_luminance = satellite_channel(
-                luminance, device, removal_model, detection_model, is_mono=True, progress_signal=progress_signal
+            satellited_image, trail_detected_in_image = satellite_channel(
+                image=stretched_image,
+                device=device,
+                removal_model=removal_model,
+                detection_model1=detection_model1,
+                detection_model2=detection_model2,
+                is_mono=is_mono,
+                sensitivity=sensitivity,
+                progress_signal=progress_signal,
+                is_onnx=is_onnx
             )
-            satellited_image = merge_luminance(satellited_luminance, cb_channel, cr_channel)
+            satellited_image = merge_luminance(satellited_image, cb_channel, cr_channel)
 
         else:  # Full RGB denoising mode
             # Process the 3-channel image directly
-            satellited_image = satellite_channel(
-                stretched_image, device, removal_model, detection_model, is_mono=False, progress_signal=progress_signal
+            satellited_image, trail_detected_in_image = satellite_channel(
+                image=stretched_image,
+                device=device,
+                removal_model=removal_model,
+                detection_model1=detection_model1,
+                detection_model2=detection_model2,
+                is_mono=is_mono,
+                sensitivity=sensitivity,
+                progress_signal=progress_signal,
+                is_onnx=is_onnx
             )
 
-        # Unstretch if stretched previously
-        if stretch_needed:
-            satellited_image = unstretch_image(satellited_image, original_median, original_min)
+        # Handle skipping saving if no trail detected
+        if not trail_detected_in_image :
+            log_message(f"No satellite trail detected in {image_path}. Proceeding with unmodified image.")
+            satellited_image = stretched_image  # Use the stretched (or original) image as the output  
 
-        # If GLOBAL_CLIP_TRAIL is True, set pixels with the minimum value to 0
+        # Unstretch the image
+        if stretch_needed:
+            print(f"De-normalizing linear data")
+            satellited_image = unstretch_image(satellited_image, original_medians, original_min)       
+
+        # Apply clip trail logic based on the `clip_trail` flag
         if GLOBAL_CLIP_TRAIL:
             min_value = np.min(satellited_image)
             satellited_image = np.where(satellited_image == min_value, 0.000, satellited_image)
-
 
         # Remove the border added around the image
         satellited_image = replace_border(original_image, satellited_image, border_size=16)
@@ -949,127 +1268,160 @@ def satellite_image(image_path, device, detection_model, removal_model, satellit
         assert satellited_image.dtype == np.float32, f"Image dtype is {satellited_image.dtype}, expected np.float32"
 
         log_message(f"Image {image_path} processed successfully.")
-        return satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta
+        return satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta, trail_detected_in_image
 
     except Exception as e:
         print(f"Error reading image {image_path}: {e}")
-        return None, None, None, None, None, None, None
-    
-# Function to satellite a single channel or 3-channel image
-def satellite_channel(image, device, removal_model, detection_model, is_mono=False, progress_signal=None):
-    """
-    Detect satellite trails in chunks and process only the detected chunks.
+        return None, None, None, None, None, None, None, None
 
-    Args:
-        image (numpy.ndarray): Image to process.
-        device (torch.device): Device to run the models on.
-        removal_model (torch.nn.Module): Pre-trained removal model.
-        detection_model (torch.nn.Module): Pre-trained detection model.
-        is_mono (bool): Whether the image is monochrome.
 
-    Returns:
-        numpy.ndarray: Processed image.
-    """
-    # Split image into chunks
+ 
+def satellite_channel(
+    image,
+    device,
+    removal_model,
+    detection_model1,
+    detection_model2,
+    is_mono=False,
+    sensitivity=0.1,
+    progress_signal=None,
+    is_onnx=False
+):
     chunk_size = 256
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(image, chunk_size=chunk_size, overlap=overlap)
     total_chunks = len(chunks)
     satellited_chunks = []
-    
-    global GLOBAL_CLIP_TRAIL  # Access the global variable
+    trail_detected_in_image = False  # New flag to track trail detection
+    global GLOBAL_CLIP_TRAIL  # Access the global variable   
 
-    # Apply satellite detection and removal models to each chunk
     for idx, (chunk, i, j) in enumerate(chunks):
         original_chunk = chunk.copy()
 
-        # Check for satellite trails in the chunk using the detection model
-        if not contains_trail_with_ai(chunk, detection_model, device):
-            # If no trail is detected, skip processing and add the original chunk
-            satellited_chunks.append((chunk, i, j))
-            continue
-
-        # Prepare the chunk tensor
-        if chunk.ndim == 2:  # Mono chunk
-            chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Triplicate mono to 3 channels
-        elif chunk.shape[-1] == 1:  # Handle grayscale chunks with explicit channel dim
-            chunk_tensor = torch.tensor(chunk.squeeze(-1), dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-            chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Triplicate mono to 3 channels
-        else:  # RGB chunk
-            chunk_tensor = torch.tensor(chunk, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
-
-        # Run the removal model
-        with torch.no_grad():
-            processed_chunk = removal_model(chunk_tensor).squeeze().cpu().numpy()
-
-        # Convert the output back to its original format
-        if chunk.ndim == 2 or chunk.shape[-1] == 1:  # Mono chunk
-            satellited_chunk = processed_chunk[0]  # Use the first output channel
-        else:  # RGB chunk
-            satellited_chunk = processed_chunk.transpose(1, 2, 0)  # Convert back to (H, W, C)
-
-        if GLOBAL_CLIP_TRAIL:
-            # Compute satellite-only image
-            sattrail_only_image = original_chunk - satellited_chunk
-
-            # Clip and scale to isolate the satellite trail
-            mean_val = np.mean(sattrail_only_image)
-            clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
-
-            # Apply a binary mask: values below 0.5 are set to 0, values >= 0.5 are set to 1
-            binary_mask = np.where(clipped_image < 0.1, 0, 1)
-
-            # Subtract the binary mask from the original chunk
-            final_chunk = np.clip(original_chunk - binary_mask, 0, 1)
+        # Detection
+        if is_onnx:
+            trail_detected = contains_trail_with_onnx(chunk, detection_model1)  # Modify if needed for ONNX
         else:
-            final_chunk = satellited_chunk
+            trail_detected = contains_trail_with_ai(chunk, detection_model1, detection_model2, device)
 
-        satellited_chunks.append((final_chunk, i, j))
+        if trail_detected:
+            trail_detected_in_image = True  # Set the flag if any chunk contains a trail
 
+            # Prepare the chunk tensor
+            if is_onnx:
+                chunk_tensor = prepare_chunk_for_onnx(chunk)
+            else:
+                chunk_tensor = prepare_chunk_for_torch(chunk, device)
+
+            # Run the removal model
+            if is_onnx:
+                processed_chunk = run_onnx_removal(chunk_tensor, removal_model, chunk.shape)
+            else:
+                processed_chunk = run_torch_removal(chunk_tensor, removal_model)
+
+            final_chunk = apply_clip_trail_logic(processed_chunk, original_chunk, sensitivity) if GLOBAL_CLIP_TRAIL else processed_chunk
+            satellited_chunks.append((final_chunk, i, j))
+        else:
+            satellited_chunks.append((chunk, i, j))
 
         # Update progress
         progress_percentage = (idx + 1) / total_chunks * 100
         if progress_signal:
-            progress_signal.emit(progress_percentage)  # Emit as a float, not a string
-        QApplication.processEvents()    
+            progress_signal.emit(progress_percentage)
+        QApplication.processEvents()
 
     # Finalize by setting the progress bar to 100%
     if progress_signal:
-        progress_signal.emit(100.0)        
+        progress_signal.emit(100.0)
 
     # Stitch the chunks back together
     satellited_image = stitch_chunks_ignore_border(
         satellited_chunks, image.shape, chunk_size=chunk_size, overlap=overlap
     )
-    return satellited_image
+    return satellited_image, trail_detected_in_image
 
 
 
-# Function to detect satellite trails in a chunk using the detection AI
-def contains_trail_with_ai(chunk, detection_model, device):
+
+def contains_trail_with_onnx(chunk, detection_model):
+    resized_chunk = resize(chunk, (256, 256, chunk.shape[2]), mode='reflect', anti_aliasing=True)
+    input_tensor = np.transpose(resized_chunk, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+    output = detection_model.run(None, {detection_model.get_inputs()[0].name: input_tensor})[0]
+    return output[0] > 0.5  # Return True if trail is detected
+
+def run_onnx_removal(chunk_tensor, removal_model, original_shape):
+    output = removal_model.run(None, {removal_model.get_inputs()[0].name: chunk_tensor})[0]
+    processed_chunk = np.transpose(output.squeeze(0), (1, 2, 0))
+    return resize(processed_chunk, original_shape, mode='reflect', anti_aliasing=True)
+
+
+
+def contains_trail_with_ai(chunk, detection_model1, detection_model2, device):
     """
-    Detect satellite trails in a chunk using the detection model.
+    Detect satellite trails in a chunk using two detection models.
 
     Args:
         chunk (numpy.ndarray): Image chunk to analyze.
-        detection_model (torch.nn.Module): Pre-trained detection model.
-        device (torch.device): Device to run the model on.
+        detection_model1 (torch.nn.Module): Primary pre-trained detection model.
+        detection_model2 (torch.nn.Module): Secondary pre-trained detection model.
+        device (torch.device): Device to run the models on.
 
     Returns:
-        bool: True if a trail is detected, False otherwise.
+        bool: True if a trail is detected by both models, False otherwise.
     """
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Resize((256, 256)),  # Ensure input size matches the model
+        transforms.Resize((256, 256)),  # Ensure input size matches the models
     ])
     input_tensor = transform(chunk).unsqueeze(0).to(device)
 
-    # Run the detection model
+    # Run the primary detection model
     with torch.no_grad():
-        output = detection_model(input_tensor).item()
+        output1 = detection_model1(input_tensor).item()
 
-    return output > 0.5  # Return True if trail is detected (output > 0.5)
+    if output1 > 0.5:
+        # If primary model detects a trail, run the secondary model
+        with torch.no_grad():
+            output2 = detection_model2(input_tensor).item()
+        # Both models must detect a trail
+        return output2 > 0.5
+    else:
+        # Primary model did not detect a trail; skip secondary model
+        return False
+
+
+def run_torch_removal(chunk_tensor, removal_model):
+    with torch.no_grad():
+        processed_chunk = removal_model(chunk_tensor).squeeze().cpu().numpy()
+
+    if chunk_tensor.ndim == 4:  # RGB chunk
+        return processed_chunk.transpose(1, 2, 0)
+    elif chunk_tensor.ndim == 3:  # Mono chunk
+        return processed_chunk[0]
+
+def prepare_chunk_for_torch(chunk, device):
+    if chunk.ndim == 2:  # Mono chunk
+        chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        return chunk_tensor.repeat(1, 3, 1, 1)  # Convert mono to 3 channels
+    elif chunk.shape[-1] == 1:  # Grayscale
+        chunk_tensor = torch.tensor(chunk.squeeze(-1), dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        return chunk_tensor.repeat(1, 3, 1, 1)  # Convert mono to 3 channels
+    else:  # RGB chunk
+        return torch.tensor(chunk, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
+
+
+def prepare_chunk_for_onnx(chunk):
+    resized_chunk = resize(chunk, (256, 256, chunk.shape[2]), mode='reflect', anti_aliasing=True)
+    return np.transpose(resized_chunk, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+
+def apply_clip_trail_logic(processed_chunk, original_chunk, sensitivity=0.1):
+    sattrail_only_image = original_chunk - processed_chunk
+    mean_val = np.mean(sattrail_only_image)
+    clipped_image = np.clip((sattrail_only_image - mean_val) * 10, 0, 1)
+    binary_mask = np.where(clipped_image < sensitivity, 0, 1)
+    return np.clip(original_chunk - binary_mask, 0, 1)
+
+
 
 def save_processed_image(image, output_path, file_extension, bit_depth, original_header=None, is_mono=False, file_meta=None, image_meta=None):
     """Save the processed image to the appropriate format."""
@@ -1131,6 +1483,7 @@ def save_processed_image(image, output_path, file_extension, bit_depth, original
                 tiff.imwrite(output_path, image[:, :, 0].astype(np.float32))
             else:
                 tiff.imwrite(output_path, image.astype(np.float32))
+
     elif file_extension == '.xisf':
         try:
             # Debug: Print original image details
@@ -1164,13 +1517,70 @@ def save_processed_image(image, output_path, file_extension, bit_depth, original
                 creator_app="Seti Astro Cosmic Clarity",
                 image_metadata=image_meta[0],  # First block of image metadata
                 xisf_metadata=file_meta,       # File-level metadata
-                codec='lz4hc',
+
                 shuffle=True
             )
             print(f"Saved {bit_depth} XISF image as RGB with metadata to: {output_path}")
 
         except Exception as e:
             print(f"Error saving XISF file: {e}")
+
+    elif file_extension in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
+        print("RAW formats are not writable. Saving as FITS instead.")
+        output_path = output_path.rsplit('.', 1)[0] + ".fits"
+
+        # Save as FITS file with metadata
+        if original_header is not None:
+            # Convert original_header (dictionary) to astropy Header object
+            fits_header = fits.Header()
+            for key, value in original_header.items():
+                fits_header[key] = value
+            fits_header['BSCALE'] = 1.0  # Scaling factor
+            fits_header['BZERO'] = 0.0   # Offset for brightness    
+
+            if is_mono:  # Grayscale FITS
+                if bit_depth == "16-bit":
+                    satellited_image_fits = (image[:, :, 0] * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = fits_header.get('BZERO', 0)
+                    bscale = fits_header.get('BSCALE', 1)
+                    satellited_image_fits = (image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+                else:  # 32-bit float
+                    satellited_image_fits = image[:, :, 0].astype(np.float32)
+
+                # Update header for a 2D (grayscale) image
+                fits_header['NAXIS'] = 2
+                fits_header['NAXIS1'] = image.shape[1]  # Width
+                fits_header['NAXIS2'] = image.shape[0]  # Height
+                fits_header.pop('NAXIS3', None)  # Remove if present
+
+                hdu = fits.PrimaryHDU(satellited_image_fits, header=fits_header)
+            else:  # RGB FITS
+                satellited_image_transposed = np.transpose(image, (2, 0, 1))  # Channels, Height, Width
+                if bit_depth == "16-bit":
+                    satellited_image_fits = (satellited_image_transposed * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = fits_header.get('BZERO', 0)
+                    bscale = fits_header.get('BSCALE', 1)
+                    satellited_image_fits = satellited_image_transposed.astype(np.float32) * bscale + bzero
+                    fits_header['BITPIX'] = -32
+                else:  # Default to 32-bit float
+                    satellited_image_fits = satellited_image_transposed.astype(np.float32)
+
+                # Update header for a 3D (RGB) image
+                fits_header['NAXIS'] = 3
+                fits_header['NAXIS1'] = satellited_image_transposed.shape[2]  # Width
+                fits_header['NAXIS2'] = satellited_image_transposed.shape[1]  # Height
+                fits_header['NAXIS3'] = satellited_image_transposed.shape[0]  # Channels
+
+                hdu = fits.PrimaryHDU(satellited_image_fits, header=fits_header)
+
+            # Write the FITS file
+            try:
+                hdu.writeto(output_path, overwrite=True)
+                print(f"RAW processed and saved as FITS to: {output_path}")
+            except Exception as e:
+                print(f"Error saving FITS file: {e}")
 
 
 
@@ -1199,12 +1609,16 @@ class BatchProcessor(QThread):
     log_signal = pyqtSignal(str)
     processing_complete = pyqtSignal()
 
-    def __init__(self, input_dir, output_dir, models, satellite_mode):
+    def __init__(self, input_dir, output_dir, models, satellite_mode, clip_trail=None, skip_save=None, sensitivity=0.1):
         super().__init__()
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.models = models
         self.satellite_mode = satellite_mode
+        self.is_onnx = models.get("is_onnx", False)
+        self.clip_trail = clip_trail if clip_trail is not None else GLOBAL_CLIP_TRAIL
+        self.skip_save = skip_save if skip_save is not None else GLOBAL_SKIP_SAVE
+        self.sensitivity = sensitivity  # Store the sensitivity value
 
     def run(self):
         try:
@@ -1214,7 +1628,7 @@ class BatchProcessor(QThread):
 
             files = [
                 f for f in os.listdir(self.input_dir)
-                if f.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf'))
+                if f.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef'))
             ]
             total_files = len(files)
 
@@ -1229,32 +1643,45 @@ class BatchProcessor(QThread):
                 self.log_signal.emit(f"Processing image: {image_name}")
 
                 try:
-                    satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta = satellite_image(
+                    satellited_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta, trail_detected_in_image = satellite_image(
                         image_path,
                         self.models['device'],
-                        self.models["detection_model"],
+                        self.models["detection_model1"],  # Primary detection model
+                        self.models["detection_model2"],  # Secondary detection model
                         self.models["removal_model"],
                         self.satellite_mode,
+                        sensitivity=self.sensitivity,  # Pass sensitivity
                         log_signal=self.log_signal,
-                        progress_signal=self.progress_signal  # Pass chunk-level progress
+                        progress_signal=self.progress_signal,
+                        is_onnx=self.is_onnx
                     )
 
-                    if satellited_image is not None:
-                        output_image_name = os.path.splitext(image_name)[0] + "_satellited" + file_extension
-                        output_image_path = os.path.join(self.output_dir, output_image_name)
-                        save_processed_image(
-                            satellited_image,
-                            output_image_path,
-                            file_extension,
-                            bit_depth,
-                            original_header,
-                            is_mono,
-                            file_meta,
-                            image_meta
-                        )
-                        self.log_signal.emit(f"Processed and saved: {output_image_name}")
-                    else:
+
+
+                    # Handle the case where no trail was detected
+                    if satellited_image is None:  # Handle cases where image processing failed entirely
                         self.log_signal.emit(f"Failed to process: {image_name}")
+                        continue
+
+                    if not trail_detected_in_image and self.skip_save:
+                        # Skip saving if no trail is detected and skip save is enabled
+                        self.log_signal.emit(f"Skipped: No satellite trail detected in {image_name}")
+                        continue
+
+                    # Save the processed image, either modified or unmodified
+                    output_image_name = os.path.splitext(image_name)[0] + "_satellited" + file_extension
+                    output_image_path = os.path.join(self.output_dir, output_image_name)
+                    save_processed_image(
+                        satellited_image,
+                        output_image_path,
+                        file_extension,
+                        bit_depth,
+                        original_header,
+                        is_mono,
+                        file_meta,
+                        image_meta
+                    )
+                    self.log_signal.emit(f"Processed and saved: {output_image_name}")
 
                 except Exception as e:
                     self.log_signal.emit(f"Error processing image {image_name}: {e}")
@@ -1264,11 +1691,11 @@ class BatchProcessor(QThread):
                 overall_progress = (processed_files / total_files) * 100
                 self.progress_signal.emit(overall_progress)
 
-            
         except Exception as e:
             self.log_signal.emit(f"Error during batch processing: {e}")
         finally:
             self.processing_complete.emit()
+
 
 class ProgressMonitorDialog(QDialog):
     def __init__(self):
@@ -1310,13 +1737,27 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, choices=["full", "luminance"], default="full", help="Satellite removal mode: 'full' or 'luminance'.")
     parser.add_argument("--batch", action="store_true", help="Enable batch processing mode for the input directory.")
     parser.add_argument("--monitor", action="store_true", help="Enable live folder monitoring for new files.")
-    parser.add_argument("--clip-trail", action="store_true", help="Clip satellite trail to 0.000 after processing.")
+    parser.add_argument("--skip-save", action="store_true", default=False, help="Skip saving images if no satellite trail is detected.")
+    parser.add_argument("--sensitivity", type=float, default=0.1, help="Sensitivity for clip trail logic (0.01 to 0.5).")  # New argument
+
+    # Introduce a mutually exclusive group for clipping
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--clip-trail", action="store_true", help="Clip satellite trail to 0.000 after processing.")
+    group.add_argument("--no-clip-trail", action="store_false", dest="clip_trail", help="Do not clip satellite trail to 0.000 after processing.")
+
+    # Set default for clip_trail
+    parser.set_defaults(clip_trail=True)  # Default behavior is to clip
 
     args = parser.parse_args()
 
-    # Declare global before assignment
+    # Validate sensitivity range
+    if not 0.01 <= args.sensitivity <= 0.5:
+        parser.error("The --sensitivity value must be between 0.01 and 0.5.")    
 
+    # Declare global before assignment
     GLOBAL_CLIP_TRAIL = args.clip_trail  # Update based on the parsed argument
+    GLOBAL_SKIP_SAVE = args.skip_save 
+    GLOBAL_SENSITIVITY = args.sensitivity   
 
     app = QApplication([])  # Initialize the Qt application
 
@@ -1332,6 +1773,8 @@ if __name__ == "__main__":
             print(f"Use GPU: {use_gpu}")
             print(f"Satellite Mode: {satellite_mode}")
             print(f"Clip Trail: {GLOBAL_CLIP_TRAIL}")
+            print(f"Skip Save: {GLOBAL_SKIP_SAVE}")      
+            print(f"Sensitivity: {GLOBAL_SENSITIVITY}")      
 
             # Load models
             models = load_models(exe_dir, use_gpu)
@@ -1355,7 +1798,10 @@ if __name__ == "__main__":
                     input_dir=input_dir,
                     output_dir=output_dir,
                     models=models,
-                    satellite_mode=satellite_mode
+                    satellite_mode=satellite_mode,
+                    clip_trail=GLOBAL_CLIP_TRAIL,
+                    skip_save=GLOBAL_SKIP_SAVE,
+                    sensitivity=GLOBAL_SENSITIVITY  # Pass sensitivity
                 )
                 batch_processor.log_signal.connect(log_message)
                 batch_processor.progress_signal.connect(update_progress)
@@ -1366,9 +1812,42 @@ if __name__ == "__main__":
 
             elif args.monitor:
                 print("Starting live folder monitoring...")
-                folder_monitor = FolderMonitor(input_dir, output_dir, models, satellite_mode)
-                folder_monitor.log_signal.connect(lambda msg: print(f"[LOG]: {msg}"))
-                folder_monitor.run()
+
+                # Create and show progress monitor
+                progress_dialog = ProgressMonitorDialog()
+                progress_dialog.show()
+
+                # Define log and progress update functions
+                def log_message(msg):
+                    progress_dialog.log_message(msg)
+
+                def update_progress(value):
+                    progress_dialog.update_progress(value)
+
+                # Create and start folder monitoring
+                folder_monitor = FolderMonitor(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    models=models,
+                    satellite_mode=satellite_mode,
+                    clip_trail=GLOBAL_CLIP_TRAIL,
+                    skip_save=GLOBAL_SKIP_SAVE,
+                    sensitivity=GLOBAL_SENSITIVITY  # Pass sensitivity
+                )
+                folder_monitor.log_signal.connect(log_message)
+                folder_monitor.progress_signal.connect(update_progress)
+
+                # Stop monitoring gracefully when the progress dialog is closed
+                def stop_monitoring():
+                    folder_monitor.stop()
+                    print("Live monitoring stopped.")
+
+                progress_dialog.finished.connect(stop_monitoring)
+
+                folder_monitor.start()
+
+                app.exec_()  # Execute the Qt event loop
+
             else:
                 print("Error: Please specify --batch or --monitor.")
         except Exception as e:
