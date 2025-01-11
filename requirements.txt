@@ -1,0 +1,10 @@
+PyQt5
+torch
+numpy
+tifffile
+astropy
+Pillow
+torchvision
+lz4
+zstandard
+rawpy
