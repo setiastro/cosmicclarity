@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox
 from tkinter import ttk
 import argparse  # For command-line argument parsing
-import onnxruntime as ort
+
 
 
 
