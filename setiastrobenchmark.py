@@ -304,17 +304,26 @@ def flat_field_correction(image_array, flat_frame, runs=3):
     return times  # Return all timings
 
 # ✅ Benchmark GUI
+from tkinter import Tk, Label
+from PIL import Image, ImageTk
+
 class BenchmarkGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Seti Astro Suite Benchmark")
-        self.root.geometry("500x450")
-        # Load the PNG into a Tkinter PhotoImage
-        self.logo_image = PhotoImage(file="benchmark.png")
-        
-        # Display it in a label
-        self.logo_label = ttk.Label(root, image=self.logo_image)
-        self.logo_label.pack(pady=5)        
+        self.root.geometry("500x600")
+
+        # Load and resize the PNG using PIL
+        original_image = Image.open("benchmark.png")
+        resized_image = original_image.resize((250, 250), Image.LANCZOS)  # Adjust the size as needed
+
+        # Convert to Tkinter-compatible format
+        self.logo_image = ImageTk.PhotoImage(resized_image)
+
+        # Display the image in a Label
+        self.logo_label = Label(root, image=self.logo_image)
+        self.logo_label.pack(pady=10)
+     
 
         self.label = ttk.Label(root, text="Seti Astro Suite Benchmark", font=("Arial", 14))
         self.label.pack(pady=10)
