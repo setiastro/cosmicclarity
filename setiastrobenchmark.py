@@ -6,18 +6,20 @@ import torch
 import requests
 import numpy as np
 import onnxruntime as ort
-import tkinter as tk
-from tkinter import ttk
 from astropy.io import fits
 from numba import njit, jit, prange
 import psutil
 import platform
-import base64
 import cpuinfo
 import multiprocessing
-from tkinter import PhotoImage
-from tkinter import Tk, Label
-from PIL import Image, ImageTk
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton,
+    QProgressBar, QTextEdit, QDialog, QHBoxLayout, QMessageBox
+)
+from PyQt6.QtGui import QPixmap, QFont
+from PyQt6.QtCore import Qt
+from PIL import Image
+from PIL.ImageQt import ImageQt  # Converts PIL image to QImage
 
 # Check for CUDA, DirectML, or MPS (Metal Performance Shaders)
 USE_CUDA = torch.cuda.is_available()
@@ -312,171 +314,190 @@ def resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-class BenchmarkGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Seti Astro Suite Benchmark")
-        self.root.geometry("500x600")
+class BenchmarkWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Seti Astro Suite Benchmark")
+        self.setGeometry(100, 100, 500, 600)
 
-        image_path = resource_path("benchmark.png")  # Use the dynamic path
+        # Main layout
+        layout = QVBoxLayout(self)
+
+        # Load and process image using Pillow
+        image_path = resource_path("benchmark.png")
         original_image = Image.open(image_path)
-        resized_image = original_image.resize((200, 200), Image.LANCZOS)  # Adjust the size as needed
+        resized_image = original_image.resize((200, 200), Image.LANCZOS)
 
-        # Convert to Tkinter-compatible format
-        self.logo_image = ImageTk.PhotoImage(resized_image)
+        # Convert PIL image to QPixmap via QImage
+        qimage = ImageQt(resized_image)
+        pixmap = QPixmap.fromImage(qimage)
 
-        # Display the image in a Label
-        self.logo_label = Label(root, image=self.logo_image)
-        self.logo_label.pack(pady=10)
-     
+        # Display the image in a QLabel
+        self.logo_label = QLabel(self)
+        self.logo_label.setPixmap(pixmap)
+        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.logo_label)
 
-        self.label = ttk.Label(root, text="Seti Astro Benchmark", font=("Arial", 14))
-        self.label.pack(pady=10)
-        # Add Version Label at the Bottom
-        self.version_label = ttk.Label(root, text="Version 1.0", font=("Arial", 10), foreground="gray")
-        self.version_label.pack(side="bottom", pady=5)   
+        # Main title label
+        self.label = QLabel("Seti Astro Benchmark", self)
+        title_font = QFont("Arial", 14)
+        self.label.setFont(title_font)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.label)
 
-        self.option = tk.StringVar(value="Both")
-        self.dropdown = ttk.Combobox(root, textvariable=self.option, values=["CPU", "GPU", "Both"])
-        self.dropdown.pack(pady=5)
+        # Version label at the bottom
+        self.version_label = QLabel("Version 1.0", self)
+        version_font = QFont("Arial", 10)
+        self.version_label.setFont(version_font)
+        self.version_label.setStyleSheet("color: gray;")
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.version_label)
 
-        self.start_button = ttk.Button(root, text="Run Benchmark", command=self.run_benchmark)
-        self.start_button.pack(pady=5)
+        # Dropdown / ComboBox for benchmark options
+        self.dropdown = QComboBox(self)
+        self.dropdown.addItems(["CPU", "GPU", "Both"])
+        self.dropdown.setCurrentText("Both")
+        layout.addWidget(self.dropdown)
 
-        self.save_button = ttk.Button(root, text="Save Locally", command=self.save_results_locally, state=tk.DISABLED)
-        self.save_button.pack(pady=5)
+        # Run Benchmark button
+        self.start_button = QPushButton("Run Benchmark", self)
+        self.start_button.clicked.connect(self.run_benchmark)
+        layout.addWidget(self.start_button)
 
-        self.submit_button = ttk.Button(root, text="Submit Benchmark", command=open_submission_page)
-        self.submit_button.pack(pady=5)
+        # Save Locally button (initially disabled)
+        self.save_button = QPushButton("Save Locally", self)
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self.save_results_locally)
+        layout.addWidget(self.save_button)
 
-        self.progress = ttk.Progressbar(root, orient=tk.HORIZONTAL, length=400, mode='determinate')
-        self.progress.pack(pady=10)
+        # Submit Benchmark button
+        self.submit_button = QPushButton("Submit Benchmark", self)
+        self.submit_button.clicked.connect(open_submission_page)
+        layout.addWidget(self.submit_button)
 
-        self.result_text = tk.Text(root, height=12, width=65)
-        self.result_text.pack(pady=10)
+        # Progress bar
+        self.progress = QProgressBar(self)
+        self.progress.setOrientation(Qt.Orientation.Horizontal)
+        self.progress.setFixedWidth(400)
+        layout.addWidget(self.progress)
+
+        # Multi-line text area for results
+        self.result_text = QTextEdit(self)
+        self.result_text.setFixedHeight(150)
+        layout.addWidget(self.result_text)
 
         self.results = {}
 
-     
-
     def run_benchmark(self):
-        self.progress['value'] = 0
-        self.result_text.delete('1.0', tk.END)
+        # Reset progress and clear previous results
+        self.progress.setValue(0)
+        self.result_text.clear()
         results = {}
 
+        # Define a progress callback to update the UI
         def progress_callback(status, clear=False):
-            """Update UI with live progress without flooding new lines."""
-            self.result_text.delete('end-2l', 'end') if clear else None  # Remove previous status line
-            self.result_text.insert(tk.END, status + "\n")
-            self.result_text.see(tk.END)
-            self.root.update()
+            if clear:
+                self.result_text.clear()
+            self.result_text.append(status)
+            QApplication.processEvents()
 
-        # ✅ Run CPU Benchmarks
-        if self.option.get() in ["CPU", "Both"]:
+        # Run CPU Benchmarks if selected
+        if self.dropdown.currentText() in ["CPU", "Both"]:
             progress_callback("Running CPU Benchmarks...")
+            QApplication.processEvents
             start_time = time.time()
 
-            # Actually run MAD and Flat-Field Correction benchmarks
+            # Run MAD and Flat-Field Correction benchmarks (assumed external functions)
             cpu_times_mad = mad_cpu(image)
             cpu_times_flat = flat_field_correction(image, image)
 
             progress_callback("Completed CPU Benchmark.")
-
             results["CPU MAD (Single Core)"] = f"First: {cpu_times_mad[0]:.2f} ms | Avg: {np.mean(cpu_times_mad[1:]):.2f} ms"
             results["CPU Flat-Field (Multi-Core)"] = f"First: {cpu_times_flat[0]:.2f} ms | Avg: {np.mean(cpu_times_flat[1:]):.2f} ms"
+            QApplication.processEvents
 
-        # ✅ Run GPU Benchmarks
-        if self.option.get() in ["GPU", "Both"]:
-            progress_callback("Running GPU Benchmarks...")
+        # Run GPU Benchmarks if selected
+        if self.dropdown.currentText() in ["GPU", "Both"]:
+            progress_callback("Running CUDA Benchmarks...")
 
             # Load model properly before running the benchmark
             model, device = load_model(os.getcwd(), use_gpu=True)
 
             avg_gpu_time, total_gpu_time = gpu_benchmark(model, device, image_tensor, progress_callback)
-            progress_callback("Completed GPU Benchmark.")
+            progress_callback("Completed CUDA Benchmark.")
 
-            avg_onnx_time, total_onnx_time = onnx_benchmark(image_tensor, progress_callback)
-            progress_callback("Completed ONNX Benchmark.", clear=True)
+            # Only run ONNX benchmark on Windows
+            if platform.system() == "Windows":
+                avg_onnx_time, total_onnx_time = onnx_benchmark(image_tensor, progress_callback)
+                progress_callback("Completed ONNX Benchmark.", clear=True)
+                results["ONNX Time"] = f"Avg: {avg_onnx_time:.2f} ms | Total: {total_onnx_time:.2f} ms"
+            else:
+                results["ONNX Time"] = "ONNX benchmark only available on Windows."
 
             results["GPU Time (CUDA)"] = f"Avg: {avg_gpu_time:.2f} ms | Total: {total_gpu_time:.2f} ms"
-            results["ONNX Time"] = f"Avg: {avg_onnx_time:.2f} ms | Total: {total_onnx_time:.2f} ms"
 
-        # ✅ Collect System Info
+
+        # Collect System Info
         results["System Info"] = get_system_info()
 
-        # ✅ Display Final Results
+        # Display Final Results
         final_results = "\n".join([f"{k}: {v}" for k, v in results.items()])
-        self.result_text.insert(tk.END, final_results)
-        self.result_text.see(tk.END)
+        self.result_text.append(final_results)
+        self.result_text.verticalScrollBar().setValue(self.result_text.verticalScrollBar().maximum())
 
-        # ✅ Store Results for Save/Upload
+        # Store Results for Saving/Uploading and enable the Save button
         self.results = results
-        self.save_button["state"] = tk.NORMAL
+        self.save_button.setEnabled(True)
 
         self.show_results_popup()
 
     def show_results_popup(self):
-        """Automatically display a pop-up with the benchmark JSON, plus Copy & Submit buttons."""
-        # Create a pop-up window
-        popup = tk.Toplevel(self.root)
-        popup.title("Benchmark Results")
+        """Display a pop-up with the benchmark JSON and Copy/Submit buttons."""
+        popup = QDialog(self)
+        popup.setWindowTitle("Benchmark Results")
+        layout = QVBoxLayout(popup)
 
-        # Convert results to a JSON string
+        label = QLabel("Your Benchmark JSON Data", popup)
+        label.setFont(QFont("Arial", 12))
+        layout.addWidget(label)
+
+        # Convert results to JSON string
         json_string = json.dumps([self.results], indent=4)
+        text_box = QTextEdit(popup)
+        text_box.setReadOnly(True)
+        text_box.setPlainText(json_string)
+        layout.addWidget(text_box)
 
-        # A label (optional)
-        label = ttk.Label(popup, text="Your Benchmark JSON Data", font=("Arial", 12))
-        label.pack(pady=5)
+        button_frame = QHBoxLayout()
+        copy_button = QPushButton("Copy to Clipboard", popup)
+        copy_button.clicked.connect(lambda: self.copy_to_clipboard(json_string))
+        button_frame.addWidget(copy_button)
 
-        # A Text widget to display the JSON
-        text_box = tk.Text(popup, wrap="word", width=80, height=20)
-        text_box.pack(padx=10, pady=10)
-        text_box.insert("1.0", json_string)
-        text_box.configure(state="disabled")  # Make it read-only
+        submit_button = QPushButton("Submit Benchmark", popup)
+        submit_button.clicked.connect(open_submission_page)
+        button_frame.addWidget(submit_button)
 
-        # A frame to hold the buttons side by side (optional)
-        button_frame = ttk.Frame(popup)
-        button_frame.pack(pady=10)
-
-        # Copy to Clipboard button
-        copy_button = ttk.Button(button_frame, text="Copy to Clipboard",
-                                command=lambda: self.copy_to_clipboard(json_string))
-        copy_button.pack(side=tk.LEFT, padx=5)
-
-        # Submit Benchmark button
-        submit_button = ttk.Button(button_frame, text="Submit Benchmark",
-                                command=open_submission_page)
-        submit_button.pack(side=tk.LEFT, padx=5)
+        layout.addLayout(button_frame)
+        popup.exec()
 
     def copy_to_clipboard(self, text):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.root.update()  # Keep clipboard data available
-        from tkinter import messagebox
-        messagebox.showinfo("Copied", "Benchmark JSON copied to clipboard!")
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        QMessageBox.information(self, "Copied", "Benchmark JSON copied to clipboard!")
 
     def save_results_locally(self):
         save_results_locally(self.results)
-        self.result_text.insert(tk.END, "\n✅ Results saved!\n")
+        self.result_text.append("\n✅ Results saved!\n")
 
-def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller."""
-    try:
-        # PyInstaller stores temp path in _MEIPASS
-        base_path = sys._MEIPASS
-    except AttributeError:
-        # If not running as a PyInstaller .exe, just use the current directory
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
 
 icon_file = resource_path("benchmark.ico")
 png_file = resource_path("benchmark.png")
 
 
-if __name__ == "__main__":
-    # Needed on Windows when using multiprocessing in a frozen app
-    multiprocessing.freeze_support()
 
-    root = tk.Tk()
-    app = BenchmarkGUI(root)
-    root.mainloop()
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    multiprocessing.freeze_support()
+    window = BenchmarkWindow()
+    window.show()
+    sys.exit(app.exec())
