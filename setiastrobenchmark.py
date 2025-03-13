@@ -306,7 +306,11 @@ def flat_field_correction(image_array, flat_frame, runs=3):
     return times  # Return all timings
 
 # ✅ Benchmark GUI
-
+def resource_path(relative_path):
+    """ Get the absolute path to a resource, works for dev and PyInstaller builds. """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 class BenchmarkGUI:
     def __init__(self, root):
@@ -314,8 +318,8 @@ class BenchmarkGUI:
         self.root.title("Seti Astro Suite Benchmark")
         self.root.geometry("500x600")
 
-        # Load and resize the PNG using PIL
-        original_image = Image.open("benchmark.png")
+        image_path = resource_path("benchmark.png")  # Use the dynamic path
+        original_image = Image.open(image_path)
         resized_image = original_image.resize((200, 200), Image.LANCZOS)  # Adjust the size as needed
 
         # Convert to Tkinter-compatible format
@@ -331,7 +335,7 @@ class BenchmarkGUI:
         # Add Version Label at the Bottom
         self.version_label = ttk.Label(root, text="Version 1.0", font=("Arial", 10), foreground="gray")
         self.version_label.pack(side="bottom", pady=5)   
-        
+
         self.option = tk.StringVar(value="Both")
         self.dropdown = ttk.Combobox(root, textvariable=self.option, values=["CPU", "GPU", "Both"])
         self.dropdown.pack(pady=5)
