@@ -330,7 +330,7 @@ class BenchmarkGUI:
         self.logo_label.pack(pady=10)
      
 
-        self.label = ttk.Label(root, text="Seti Astro Suite Benchmark", font=("Arial", 14))
+        self.label = ttk.Label(root, text="Seti Astro Benchmark", font=("Arial", 14))
         self.label.pack(pady=10)
         # Add Version Label at the Bottom
         self.version_label = ttk.Label(root, text="Version 1.0", font=("Arial", 10), foreground="gray")
