@@ -317,7 +317,7 @@ def resource_path(relative_path):
 class BenchmarkWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Seti Astro Suite Benchmark")
+        self.setWindowTitle("Seti Astro Benchmark")
         self.setGeometry(100, 100, 500, 600)
 
         # Main layout
