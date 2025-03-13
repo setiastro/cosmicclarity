@@ -16,6 +16,8 @@ import base64
 import cpuinfo
 import multiprocessing
 from tkinter import PhotoImage
+from tkinter import Tk, Label
+from PIL import Image, ImageTk
 
 # Check for CUDA, DirectML, or MPS (Metal Performance Shaders)
 USE_CUDA = torch.cuda.is_available()
@@ -304,8 +306,7 @@ def flat_field_correction(image_array, flat_frame, runs=3):
     return times  # Return all timings
 
 # ✅ Benchmark GUI
-from tkinter import Tk, Label
-from PIL import Image, ImageTk
+
 
 class BenchmarkGUI:
     def __init__(self, root):
@@ -315,7 +316,7 @@ class BenchmarkGUI:
 
         # Load and resize the PNG using PIL
         original_image = Image.open("benchmark.png")
-        resized_image = original_image.resize((250, 250), Image.LANCZOS)  # Adjust the size as needed
+        resized_image = original_image.resize((200, 200), Image.LANCZOS)  # Adjust the size as needed
 
         # Convert to Tkinter-compatible format
         self.logo_image = ImageTk.PhotoImage(resized_image)
@@ -327,7 +328,10 @@ class BenchmarkGUI:
 
         self.label = ttk.Label(root, text="Seti Astro Suite Benchmark", font=("Arial", 14))
         self.label.pack(pady=10)
-
+        # Add Version Label at the Bottom
+        self.version_label = ttk.Label(root, text="Version 1.0", font=("Arial", 10), foreground="gray")
+        self.version_label.pack(side="bottom", pady=5)   
+        
         self.option = tk.StringVar(value="Both")
         self.dropdown = ttk.Combobox(root, textvariable=self.option, values=["CPU", "GPU", "Both"])
         self.dropdown.pack(pady=5)
@@ -348,6 +352,8 @@ class BenchmarkGUI:
         self.result_text.pack(pady=10)
 
         self.results = {}
+
+     
 
     def run_benchmark(self):
         self.progress['value'] = 0
