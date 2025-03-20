@@ -1013,6 +1013,7 @@ class UpscalingApp(QMainWindow):
         self.setWindowIcon(QIcon(resource_path("upscale.ico")))
         self.resize(600, 300)
         self.initUI()
+
     def initUI(self):
         widget = QWidget()
         self.setCentralWidget(widget)
@@ -1072,11 +1073,24 @@ class UpscalingApp(QMainWindow):
         btn_run = QPushButton("Run Upscaling")
         btn_run.clicked.connect(self.run_processing)
         layout.addWidget(btn_run)
+
+        # Authorship/Version info with clickable link
+        authorship_label = QLabel()
+        authorship_label.setText(
+            "Written by Franklin Marek © 2025 - <a href='http://www.setiastro.com'>www.setiastro.com</a>"
+        )
+        authorship_label.setOpenExternalLinks(True)
+        authorship_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(authorship_label)
+
     def select_input(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Select Input Image", "", 
-            "Images (*.png *.tif *.tiff *.fits *.fit *.jpg *.jpeg *.xisf)")
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Select Input Image", "", 
+            "Images (*.png *.tif *.tiff *.fits *.fit *.jpg *.jpeg *.xisf)"
+        )
         if file_name:
             self.input_edit.setText(file_name)
+
     def select_output_directory(self):
         # If an input file has already been selected, use its directory as default.
         if self.input_edit.text():
@@ -1086,7 +1100,6 @@ class UpscalingApp(QMainWindow):
         dir_name = QFileDialog.getExistingDirectory(self, "Select Output Directory", initial_dir)
         if dir_name:
             self.outdir_edit.setText(dir_name)
-
 
     def generate_output_filename(self, input_path, output_dir, scale, output_type):
         # If no output directory is specified, use the input file's directory.
@@ -1128,14 +1141,13 @@ class UpscalingApp(QMainWindow):
         out_filename = self.generate_output_filename(input_path, outdir, scale, self.outtype_combo.currentText())
         try:
             save_image(img, out_filename, original_format, bit_depth=bit_depth,
-                    original_header=original_header, is_mono=is_mono)
+                       original_header=original_header, is_mono=is_mono)
             print(f"Saved upscaled image to {out_filename}")
             QMessageBox.information(self, "Processing Complete",
                                     f"Saved upscaled image to:\n{out_filename}")
         except Exception as e:
             print(f"Error saving image: {e}")
             QMessageBox.critical(self, "Error", f"Error saving image:\n{e}")
-
 
 ##########################################
 # Main Function & Command-Line Interface
