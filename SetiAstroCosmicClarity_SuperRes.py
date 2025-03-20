@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tifffile as tiff
-
+import onnxruntime as ort
 # Additional dependencies for robust I/O
 import rawpy
 from astropy.io import fits
@@ -802,28 +802,91 @@ class SuperResolutionCNN(nn.Module):
         d1 = self.decoder1(d2)
         return d1
 
-##########################################
-# 5. Processing Function
-##########################################
-def process_image(input_path, scale, model, device, progress_callback=None):
+# ---------------------------------------------
+# Model Loading Helper Function
+# ---------------------------------------------
+def load_superres_model(scale, model_dir):
+    """
+    Load the super-resolution model for the given scale and model directory.
+    
+    On Windows:
+      - If CUDA is available, load the PyTorch .pth model.
+      - Otherwise, if ONNX runtime has DirectML available, load the ONNX model.
+      - Otherwise, fall back on CPU PyTorch.
+      
+    On Linux:
+      - Use CUDA if available, else CPU.
+      
+    On macOS:
+      - Use MPS if available, else CPU.
+      
+    Returns:
+        (model, device, use_pytorch) where use_pytorch is a bool.
+    """
+    import sys
+    if sys.platform.startswith("win"):
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            use_pytorch = True
+        else:
+            providers = ort.get_available_providers()
+            if "DmlExecutionProvider" in providers:
+                device = "DirectML"
+                use_pytorch = False
+            else:
+                device = torch.device("cpu")
+                use_pytorch = True
+    elif sys.platform.startswith("linux"):
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        use_pytorch = True
+    elif sys.platform == "darwin":
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        use_pytorch = True
+    else:
+        device = torch.device("cpu")
+        use_pytorch = True
+
+    if use_pytorch:
+        model_filename = os.path.join(model_dir, f"superres_{scale}x.pth")
+        if not os.path.exists(model_filename):
+            raise ValueError(f"Model file not found: {model_filename}")
+        model = SuperResolutionCNN().to(device)
+        model.load_state_dict(torch.load(model_filename, map_location=device))
+        model.eval()
+        return model, device, True
+    else:
+        # Using ONNX runtime with DirectML on Windows
+        model_filename = os.path.join(model_dir, f"superres_{scale}x.onnx")
+        if not os.path.exists(model_filename):
+            raise ValueError(f"ONNX model file not found: {model_filename}")
+        sess = ort.InferenceSession(model_filename, providers=["DmlExecutionProvider"])
+        return sess, None, False
+
+# ---------------------------------------------
+# Updated process_image function
+# ---------------------------------------------
+def process_image(input_path, scale, model, device, use_pytorch, progress_callback=None):
     """
     Process an image:
       - Loads the image using robust load_image
       - Adds a border and applies a linear stretch
       - Upscales using bicubic interpolation by the given scale
       - Splits the upscaled image into overlapping 256×256 patches
-      - Processes each patch with the neural net
+      - Processes each patch with the neural net (using PyTorch or ONNX)
       - Stitches patches back together, unstretches the result, and removes the border
     Returns the final image as a NumPy array in [0,1].
     """
-    # Use our robust load_image
     load_result = load_image(input_path)
     if load_result[0] is None:
-        return None, None, None, None
+        return None, None, None, None, None
     image, original_header, bit_depth, is_mono = load_result
-    # Determine original format from extension (lowercase without dot)
     ext = os.path.splitext(input_path)[1].lower().strip('.')
-    # Add border and stretch
     image_border = add_border(image, border_size=16)
     stretched, orig_min, orig_medians = stretch_image_custom(image_border)
     h, w = stretched.shape[:2]
@@ -832,47 +895,57 @@ def process_image(input_path, scale, model, device, progress_callback=None):
     chunks = split_image_into_chunks_with_overlap(upscaled, chunk_size=256, overlap=64)
     total_chunks = len(chunks)
     processed_chunks = []
-    model.eval()
-    with torch.no_grad():
-        for idx, (patch, i, j, is_edge) in enumerate(chunks):
-            ph, pw = patch.shape[:2]
-            if ph < 256 or pw < 256:
-                padded = np.zeros((256,256,3), dtype=np.float32)
-                padded[:ph, :pw, :] = patch
-                patch = padded
+    if use_pytorch:
+        model.eval()
+    for idx, (patch, i, j, is_edge) in enumerate(chunks):
+        ph, pw = patch.shape[:2]
+        if ph < 256 or pw < 256:
+            padded = np.zeros((256, 256, 3), dtype=np.float32)
+            padded[:ph, :pw, :] = patch
+            patch = padded
+        if use_pytorch:
             patch_tensor = torch.from_numpy(patch.transpose(2,0,1)).unsqueeze(0).to(device)
-            with torch.cuda.amp.autocast(enabled=(device.type=='cuda')):
+            with torch.cuda.amp.autocast(enabled=(device.type=='cuda' if device is not None else False)):
                 output = model(patch_tensor)
             out_np = output.squeeze().cpu().numpy()
-            out_np = np.transpose(out_np, (1,2,0))
-            out_np = out_np[:ph, :pw, :]
-            processed_chunks.append((out_np, i, j, is_edge))
-            if progress_callback:
-                progress_callback(idx+1, total_chunks)
+        else:
+            # ONNX inference expects numpy input of shape (1,3,256,256)
+            patch_input = np.expand_dims(patch.transpose(2,0,1), axis=0).astype(np.float32)
+            input_name = model.get_inputs()[0].name
+            output_name = model.get_outputs()[0].name
+            result = model.run([output_name], {input_name: patch_input})
+            out_np = result[0].squeeze()
+        out_np = np.transpose(out_np, (1,2,0))
+        out_np = out_np[:ph, :pw, :]
+        processed_chunks.append((out_np, i, j, is_edge))
+        if progress_callback:
+            progress_callback(idx+1, total_chunks)
     stitched = stitch_chunks_ignore_border(processed_chunks, upscaled.shape, chunk_size=256, overlap=64, border_size=16)
     unstreched = unstretch_image_custom(stitched, orig_medians, orig_min)
     border = int(16 * scale)
     final = remove_border(unstreched, border_size=border)
-    # If the original image was mono, collapse the processed image from (H,W,3) to (H,W)
     if is_mono:
         final = final[..., 0]
-    return final, original_header, bit_depth, ext
+    return final, original_header, bit_depth, ext, is_mono
 
-
+# ---------------------------------------------
+# ProcessingThread remains largely the same; now also pass use_pytorch
+# ---------------------------------------------
 class ProcessingThread(QThread):
     progress_signal = pyqtSignal(int)
-    finished_signal = pyqtSignal(object, object, object, object)  # final_image, original_header, bit_depth, original_format
-    def __init__(self, input_path, scale, model, device):
+    finished_signal = pyqtSignal(object, object, object, object, object)  # final_image, original_header, bit_depth, original_format, is_mono
+    def __init__(self, input_path, scale, model, device, use_pytorch):
         super().__init__()
         self.input_path = input_path
         self.scale = scale
         self.model = model
         self.device = device
+        self.use_pytorch = use_pytorch
     def run(self):
         def progress_callback(current, total):
             pct = int((current/total)*100)
             self.progress_signal.emit(pct)
-        result = process_image(self.input_path, self.scale, self.model, self.device, progress_callback)
+        result = process_image(self.input_path, self.scale, self.model, self.device, self.use_pytorch, progress_callback)
         self.finished_signal.emit(*result)
 
 class UpscalingApp(QMainWindow):
