@@ -468,7 +468,7 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
         elif original_format in ['fits', 'fit']:
             if not filename.lower().endswith(f".{original_format}"):
                 filename = filename.rsplit('.', 1)[0] + f".{original_format}"
-            # Prepare the FITS header (using your existing code)
+            # Prepare the FITS header
             if is_xisf:
                 print("Detected XISF metadata. Converting to FITS header...")
                 fits_header = fits.Header()
@@ -509,32 +509,38 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                     except Exception as e:
                         print(f"Skipping key {key}")
             else:
-                raise ValueError("Original header is required for FITS format!")
+                # Create a default header if none was provided.
+                print("No original header found; creating a default header.")
+                fits_header = fits.Header()
+
             fits_header['BSCALE'] = 1.0
             fits_header['BZERO'] = 0.0
 
+
             if is_mono or img_array.ndim == 2:
                 if img_array.ndim == 3:
-                    # Collapse the three channels to one (e.g., taking the first channel)
                     img_array_fits = img_array[:, :, 0]
                 else:
                     img_array_fits = img_array
                 fits_header['NAXIS'] = 2
-                # Remove any extraneous header keywords for a third axis:
-                if 'NAXIS3' in fits_header:
-                    del fits_header['NAXIS3']
+                fits_header.pop('NAXIS3', None)
             else:
-                img_array_fits = np.transpose(img_array, (2, 0, 1))
+                # Explicitly check and fix the shape to (3, H, W)
+                if img_array.ndim == 3:
+                    if img_array.shape[2] == 3:
+                        img_array_fits = np.transpose(img_array, (2, 0, 1))
+                    elif img_array.shape[0] == 3:
+                        img_array_fits = img_array
+                    else:
+                        raise ValueError(f"Unexpected color image shape {img_array.shape} when saving FITS!")
+                else:
+                    raise ValueError(f"Unexpected array dimensions {img_array.ndim} when saving FITS!")
+
                 fits_header['NAXIS'] = 3
                 fits_header['NAXIS3'] = 3
 
-            # Always update NAXIS1 and NAXIS2 based on the actual image array
-            if img_array_fits.ndim == 2:
-                fits_header['NAXIS1'] = img_array_fits.shape[1]
-                fits_header['NAXIS2'] = img_array_fits.shape[0]
-            else:
-                fits_header['NAXIS1'] = img_array.shape[1]
-                fits_header['NAXIS2'] = img_array.shape[0]
+            fits_header['NAXIS1'] = img_array_fits.shape[-1]  # width
+            fits_header['NAXIS2'] = img_array_fits.shape[-2]  # height
 
             hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
             hdu.writeto(filename, overwrite=True)
@@ -877,6 +883,8 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
       - Loads the image using robust load_image
       - Adds a border and applies a linear stretch
       - Upscales using bicubic interpolation by the given scale
+      - If the original image is colored, processes each channel separately 
+        (by duplicating the single channel to match the network’s expected 3-channel input)
       - Splits the upscaled image into overlapping 256×256 patches
       - Processes each patch with the neural net (using PyTorch or ONNX)
       - Stitches patches back together, unstretches the result, and removes the border
@@ -886,46 +894,93 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
     if load_result[0] is None:
         return None, None, None, None, None
     image, original_header, bit_depth, is_mono = load_result
+    print(f"Loaded image: shape={image.shape}, bit depth={bit_depth}-bit, mono={is_mono}")
     ext = os.path.splitext(input_path)[1].lower().strip('.')
-    image_border = add_border(image, border_size=16)
-    stretched, orig_min, orig_medians = stretch_image_custom(image_border)
-    h, w = stretched.shape[:2]
-    new_h, new_w = int(h * scale), int(w * scale)
-    upscaled = cv2.resize(stretched, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-    chunks = split_image_into_chunks_with_overlap(upscaled, chunk_size=256, overlap=64)
-    total_chunks = len(chunks)
-    processed_chunks = []
-    if use_pytorch:
-        model.eval()
-    for idx, (patch, i, j, is_edge) in enumerate(chunks):
-        ph, pw = patch.shape[:2]
-        if ph < 256 or pw < 256:
-            padded = np.zeros((256, 256, 3), dtype=np.float32)
-            padded[:ph, :pw, :] = patch
-            patch = padded
-        if use_pytorch:
-            patch_tensor = torch.from_numpy(patch.transpose(2,0,1)).unsqueeze(0).to(device)
-            with torch.cuda.amp.autocast(enabled=(device.type=='cuda' if device is not None else False)):
-                output = model(patch_tensor)
-            out_np = output.squeeze().cpu().numpy()
-        else:
-            # ONNX inference expects numpy input of shape (1,3,256,256)
-            patch_input = np.expand_dims(patch.transpose(2,0,1), axis=0).astype(np.float32)
-            input_name = model.get_inputs()[0].name
-            output_name = model.get_outputs()[0].name
-            result = model.run([output_name], {input_name: patch_input})
-            out_np = result[0].squeeze()
-        out_np = np.transpose(out_np, (1,2,0))
-        out_np = out_np[:ph, :pw, :]
-        processed_chunks.append((out_np, i, j, is_edge))
-        if progress_callback:
-            progress_callback(idx+1, total_chunks)
-    stitched = stitch_chunks_ignore_border(processed_chunks, upscaled.shape, chunk_size=256, overlap=64, border_size=16)
-    unstreched = unstretch_image_custom(stitched, orig_medians, orig_min)
-    border = int(16 * scale)
-    final = remove_border(unstreched, border_size=border)
+
+    def process_single_channel(channel_image):
+
+        
+        # Add border and stretch
+        channel_border = add_border(channel_image, border_size=16)
+
+        stretched, orig_min, orig_medians = stretch_image_custom(channel_border)
+
+
+        # Upscale using bicubic interpolation
+        h, w = stretched.shape[:2]
+        new_h, new_w = int(h * scale), int(w * scale)
+        upscaled = cv2.resize(stretched, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+
+
+        # Split into chunks and process each patch
+        chunks = split_image_into_chunks_with_overlap(upscaled, chunk_size=256, overlap=64)
+        processed_chunks = []
+
+        for idx, (patch, i, j, is_edge) in enumerate(chunks):
+            ph, pw = patch.shape[:2]
+            # Prepare patch input for network: duplicate single channel to 3 channels
+            patch_input = np.zeros((256, 256, 3), dtype=np.float32)
+            patch_input[:ph, :pw, :] = np.repeat(patch[..., np.newaxis], 3, axis=2)
+
+
+            # Process the patch with the model
+            if use_pytorch:
+                patch_tensor = torch.from_numpy(patch_input.transpose(2, 0, 1)).unsqueeze(0).to(device)
+                with torch.amp.autocast('cuda', enabled=(device.type == 'cuda' if device else False)):
+                    output = model(patch_tensor)
+                out_np = output.squeeze().detach().cpu().numpy()
+            else:
+                patch_input_np = np.expand_dims(patch_input.transpose(2, 0, 1), axis=0).astype(np.float32)
+                result = model.run(None, {model.get_inputs()[0].name: patch_input_np})[0]
+                out_np = result.squeeze()
+
+
+            # Extract the first channel (since output is 3-channel grayscale)
+            if out_np.ndim == 3:
+                if out_np.shape[0] == 3:
+                    out_np = out_np[0, :, :]
+                elif out_np.shape[-1] == 3:
+                    out_np = out_np[..., 0]
+
+
+            # Crop to original patch size
+            out_np = out_np[:ph, :pw]
+
+            processed_chunks.append((out_np, i, j, is_edge))
+
+            if progress_callback:
+                progress_callback(idx+1, len(chunks))
+
+        # Stitch the processed patches back together
+        stitched = stitch_chunks_ignore_border(
+            processed_chunks, upscaled.shape[:2], chunk_size=256, overlap=64, border_size=16
+        )
+
+        unstretched = unstretch_image_custom(stitched, orig_medians, orig_min)
+
+        border = int(16 * scale)
+        final_channel = remove_border(unstretched, border_size=border)
+
+        # Squeeze out extra channel dimension if present
+        if final_channel.ndim == 3 and final_channel.shape[-1] == 1:
+            final_channel = final_channel[..., 0]
+
+        return final_channel
+
     if is_mono:
-        final = final[..., 0]
+        final = process_single_channel(image)
+
+    else:
+        final_channels = []
+        for c in range(3):
+            print(f"\n[DEBUG] Processing color channel {c+1}/3")
+            channel_result = process_single_channel(image[..., c])
+            print(f"[DEBUG] Color channel {c+1} result shape: {channel_result.shape}")
+            final_channels.append(channel_result)
+        # Combine channels into final RGB image
+        final = np.stack(final_channels, axis=-1)
+        print(f"[DEBUG] Final RGB image shape after stacking: {final.shape}")
+
     return final, original_header, bit_depth, ext, is_mono
 
 # ---------------------------------------------
@@ -949,12 +1004,12 @@ class ProcessingThread(QThread):
         self.finished_signal.emit(*result)
 
 class UpscalingApp(QMainWindow):
-    def __init__(self, model, device):
+    def __init__(self, model, device, use_pytorch):
         super().__init__()
         self.model = model
         self.device = device
+        self.use_pytorch = use_pytorch  # Save the flag for later use
         self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool")
-        # Set window icon (from bundled resource)
         self.setWindowIcon(QIcon(resource_path("upscale.ico")))
         self.resize(600, 300)
         self.initUI()
@@ -1057,22 +1112,23 @@ class UpscalingApp(QMainWindow):
         if not input_path or not outdir:
             return
         scale = float(self.scale_combo.currentText())
-        # Get user-selected output type and bit depth (though these are passed to save_image)
-        out_type = self.outtype_combo.currentText().lower()  # e.g. "png", "tiff", "fits"
+        out_type = self.outtype_combo.currentText().lower()
         bit_depth = self.depth_combo.currentText()
         self.progress_bar.setValue(0)
-        self.thread = ProcessingThread(input_path, scale, self.model, self.device)
+        self.thread = ProcessingThread(input_path, scale, self.model, self.device, self.use_pytorch)
         self.thread.progress_signal.connect(self.progress_bar.setValue)
-        self.thread.finished_signal.connect(lambda img, hdr, bd, orig_fmt: self.save_result(img, hdr, bit_depth, out_type, outdir, input_path, scale))
+        self.thread.finished_signal.connect(lambda img, hdr, bd, orig_fmt, mono: self.save_result(img, hdr, bit_depth, out_type, outdir, input_path, scale, mono))
         self.thread.start()
-    def save_result(self, img, original_header, bd, original_format, outdir, input_path, scale):
+
+    def save_result(self, img, original_header, bit_depth, original_format, outdir, input_path, scale, is_mono):
+        # Now there are 8 parameters besides self.
         if img is None:
             print("Processing failed.")
             return
         out_filename = self.generate_output_filename(input_path, outdir, scale, self.outtype_combo.currentText())
         try:
-            save_image(img, out_filename, original_format, bit_depth=self.depth_combo.currentText(),
-                    original_header=original_header, is_mono=False)
+            save_image(img, out_filename, original_format, bit_depth=bit_depth,
+                    original_header=original_header, is_mono=is_mono)
             print(f"Saved upscaled image to {out_filename}")
             QMessageBox.information(self, "Processing Complete",
                                     f"Saved upscaled image to:\n{out_filename}")
@@ -1080,52 +1136,46 @@ class UpscalingApp(QMainWindow):
             print(f"Error saving image: {e}")
             QMessageBox.critical(self, "Error", f"Error saving image:\n{e}")
 
+
 ##########################################
 # Main Function & Command-Line Interface
 ##########################################
 def main():
-    # Create one QApplication instance and set the icon
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(resource_path("upscale.png")))
     parser = argparse.ArgumentParser(description="Cosmic Clarity Super-Resolution Upscaling Tool")
     parser.add_argument("--input", type=str, help="Path to input image")
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--scale", type=int, choices=[2,3,4], help="Upscale factor: 2, 3, or 4")
-    parser.add_argument("--model_dir", type=str, default=".", help="Directory containing superres .pth files")
+    parser.add_argument("--model_dir", type=str, default=".", help="Directory containing superres model files")
     args = parser.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    scale = args.scale if args.scale else 2
-    model_filename = os.path.join(args.model_dir, f"superres_{scale}x.pth")
-    if not os.path.exists(model_filename):
-        print(f"Model file not found: {model_filename}")
+    try:
+        model, device, use_pytorch = load_superres_model(args.scale if args.scale else 2, args.model_dir)
+    except Exception as e:
+        print(f"Error loading model: {e}")
         sys.exit(1)
-    model = SuperResolutionCNN().to(device)
-    model.load_state_dict(torch.load(model_filename, map_location=device))
-    model.eval()
-    print(f"Loaded model: {model_filename}")
-    # If command-line args are provided, run headless:
+    print(f"Using device: {device}")
     if args.input and args.output_dir:
-        print("Running in headless mode...")
-        result = process_image(args.input, scale, model, device, progress_callback=lambda cur, tot: print(f"Progress: {cur}/{tot} chunks", end='\r'))
+        # Headless mode...
+        result = process_image(args.input, args.scale if args.scale else 2, model, device, use_pytorch,
+                                progress_callback=lambda cur, tot: print(f"Progress: {cur}/{tot} chunks", end='\r'))
         if result[0] is not None:
-            final_img, orig_hdr, bd, orig_fmt = result
-            # Generate output filename automatically:
+            final_img, orig_hdr, bd, orig_fmt, mono = result
             base = os.path.splitext(os.path.basename(args.input))[0]
-            suffix = f"_upscaled{scale}x"
-            # Use user-specified type if provided; otherwise, default to PNG
-            out_type = "png"
-            output_filename = os.path.join(args.output_dir, base + suffix + "." + out_type)
+            suffix = f"_upscaled{int(args.scale)}x"
+            out_type = "png"  # or you can add an argument to override this
+            output_filename = os.path.join(os.path.abspath(args.output_dir), base + suffix + "." + out_type)
             try:
-                save_image(final_img, output_filename, orig_fmt, bit_depth=bd, original_header=orig_hdr, is_mono=False)
+                save_image(final_img, output_filename, orig_fmt, bit_depth=bd, original_header=orig_hdr, is_mono=mono)
                 print(f"\nSaved upscaled image to {output_filename}")
             except Exception as e:
                 print(f"Error saving image: {e}")
         sys.exit(0)
     else:
-        window = UpscalingApp(model, device)
+        window = UpscalingApp(model, device, use_pytorch)
         window.show()
         sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
