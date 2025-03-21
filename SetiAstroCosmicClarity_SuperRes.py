@@ -814,30 +814,18 @@ class SuperResolutionCNN(nn.Module):
 def load_superres_model(scale, model_dir):
     """
     Load the super-resolution model for the given scale and model directory.
-    Supports PyTorch and ONNX fallback, with PyInstaller compatibility.
-    """
-    import sys
 
-    # 🛠 Make model_dir work with PyInstaller --onefile
-    try:
-        if hasattr(sys, "_MEIPASS"):
-            model_dir = sys._MEIPASS
-    except Exception:
-        pass
-    """
-    Load the super-resolution model for the given scale and model directory.
-    
     On Windows:
       - If CUDA is available, load the PyTorch .pth model.
       - Otherwise, if ONNX runtime has DirectML available, load the ONNX model.
       - Otherwise, fall back on CPU PyTorch.
-      
+
     On Linux:
       - Use CUDA if available, else CPU.
-      
+
     On macOS:
       - Use MPS if available, else CPU.
-      
+
     Returns:
         (model, device, use_pytorch) where use_pytorch is a bool.
     """
@@ -875,7 +863,7 @@ def load_superres_model(scale, model_dir):
         if not os.path.exists(model_filename):
             raise ValueError(f"Model file not found: {model_filename}")
         model = SuperResolutionCNN().to(device)
-        model.load_state_dict(torch.load(model_filename, map_location=device))
+        model.load_state_dict(torch.load(model_filename, map_location=device, weights_only=True))
         model.eval()
         return model, device, True
     else:
@@ -885,6 +873,7 @@ def load_superres_model(scale, model_dir):
             raise ValueError(f"ONNX model file not found: {model_filename}")
         sess = ort.InferenceSession(model_filename, providers=["DmlExecutionProvider"])
         return sess, None, False
+
 
 # ---------------------------------------------
 # Updated process_image function
@@ -1187,7 +1176,7 @@ def main():
             final_img, orig_hdr, bd, orig_fmt, mono = result
             base = os.path.splitext(os.path.basename(args.input))[0]
             suffix = f"_upscaled{int(args.scale)}x"
-            out_type = "png"  # or you can add an argument to override this
+            out_type = "tif"  # or you can add an argument to override this
             output_filename = os.path.join(os.path.abspath(args.output_dir), base + suffix + "." + out_type)
             try:
                 save_image(final_img, output_filename, orig_fmt, bit_depth=bd, original_header=orig_hdr, is_mono=mono)
