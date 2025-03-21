@@ -814,6 +814,18 @@ class SuperResolutionCNN(nn.Module):
 def load_superres_model(scale, model_dir):
     """
     Load the super-resolution model for the given scale and model directory.
+    Supports PyTorch and ONNX fallback, with PyInstaller compatibility.
+    """
+    import sys
+
+    # 🛠 Make model_dir work with PyInstaller --onefile
+    try:
+        if hasattr(sys, "_MEIPASS"):
+            model_dir = sys._MEIPASS
+    except Exception:
+        pass
+    """
+    Load the super-resolution model for the given scale and model directory.
     
     On Windows:
       - If CUDA is available, load the PyTorch .pth model.
