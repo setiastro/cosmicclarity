@@ -1171,15 +1171,16 @@ def main():
     if args.input and args.output_dir:
         # Headless mode...
         result = process_image(args.input, args.scale if args.scale else 2, model, device, use_pytorch,
-                                progress_callback=lambda cur, tot: print(f"Progress: {cur}/{tot} chunks", end='\r'))
+                                progress_callback=lambda cur, tot: print(f"PROGRESS: {int((cur/tot)*100)}%", flush=True)
+)
         if result[0] is not None:
             final_img, orig_hdr, bd, orig_fmt, mono = result
             base = os.path.splitext(os.path.basename(args.input))[0]
             suffix = f"_upscaled{int(args.scale)}x"
-            out_type = "tif"  # or you can add an argument to override this
+            out_type = "tif"  # explicitly TIFF format
             output_filename = os.path.join(os.path.abspath(args.output_dir), base + suffix + "." + out_type)
             try:
-                save_image(final_img, output_filename, orig_fmt, bit_depth=bd, original_header=orig_hdr, is_mono=mono)
+                save_image(final_img, output_filename, "tiff", bit_depth="32-bit floating point", original_header=orig_hdr, is_mono=mono)
                 print(f"\nSaved upscaled image to {output_filename}")
             except Exception as e:
                 print(f"Error saving image: {e}")
