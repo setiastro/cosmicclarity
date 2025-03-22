@@ -638,7 +638,6 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 ##########################################
 # 2. Stretch / Unstretch Functions
 ##########################################
-# Function to stretch an image
 def stretch_image(image):
     original_min = np.min(image)
     stretched_image = image - original_min
@@ -694,7 +693,6 @@ def unstretch_image(image, original_medians, original_min):
     image = np.clip(image, 0, 1)
 
     return image
-
 
 ##########################################
 # 3. Other Utility Functions
@@ -826,18 +824,30 @@ class SuperResolutionCNN(nn.Module):
 def load_superres_model(scale, model_dir):
     """
     Load the super-resolution model for the given scale and model directory.
+    Supports PyTorch and ONNX fallback, with PyInstaller compatibility.
+    """
+    import sys
 
+    # 🛠 Make model_dir work with PyInstaller --onefile
+    try:
+        if hasattr(sys, "_MEIPASS"):
+            model_dir = sys._MEIPASS
+    except Exception:
+        pass
+    """
+    Load the super-resolution model for the given scale and model directory.
+    
     On Windows:
       - If CUDA is available, load the PyTorch .pth model.
       - Otherwise, if ONNX runtime has DirectML available, load the ONNX model.
       - Otherwise, fall back on CPU PyTorch.
-
+      
     On Linux:
       - Use CUDA if available, else CPU.
-
+      
     On macOS:
       - Use MPS if available, else CPU.
-
+      
     Returns:
         (model, device, use_pytorch) where use_pytorch is a bool.
     """
