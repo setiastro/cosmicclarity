@@ -638,51 +638,63 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 ##########################################
 # 2. Stretch / Unstretch Functions
 ##########################################
-def stretch_image_custom(image):
-    """
-    Perform a linear stretch on the image with unlinked channels.
-    Returns (stretched_image, original_min, original_medians)
-    """
+# Function to stretch an image
+def stretch_image(image):
     original_min = np.min(image)
     stretched_image = image - original_min
-    original_medians = []
-    for c in range(3):
-        channel_median = np.median(stretched_image[..., c])
-        original_medians.append(channel_median)
-    target_median = 0.25
-    for c in range(3):
-        channel_median = original_medians[c]
+
+    is_single_channel = (image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1))
+
+    if is_single_channel:
+        channel_median = np.median(stretched_image)
+        original_medians = [channel_median]
+        target_median = 0.25
         if channel_median != 0:
-            stretched_image[..., c] = ((channel_median - 1) * target_median * stretched_image[..., c]) / (
-                channel_median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+            stretched_image = ((channel_median - 1) * target_median * stretched_image) / (
+                channel_median * (target_median + stretched_image - 1) - target_median * stretched_image
             )
+    else:
+        original_medians = []
+        target_median = 0.25
+        for c in range(3):
+            channel_median = np.median(stretched_image[..., c])
+            original_medians.append(channel_median)
+            if channel_median != 0:
+                stretched_image[..., c] = ((channel_median - 1) * target_median * stretched_image[..., c]) / (
+                    channel_median * (target_median + stretched_image[..., c] - 1) - target_median * stretched_image[..., c]
+                )
+
     stretched_image = np.clip(stretched_image, 0, 1)
+
     return stretched_image, original_min, original_medians
 
-def unstretch_image_custom(image, original_medians, original_min):
-    """
-    Undo the linear stretch.
-    """
-    was_single_channel = False
-    if image.ndim == 3 and image.shape[2] == 1:
-        was_single_channel = True
-        image = np.repeat(image, 3, axis=2)
-    elif image.ndim == 2:
-        was_single_channel = True
-        image = np.stack([image]*3, axis=-1)
-    for c in range(3):
-        channel_median = np.median(image[..., c])
-        if channel_median != 0 and original_medians[c] != 0:
-            image[..., c] = ((channel_median - 1) * original_medians[c] * image[..., c]) / (
-                channel_median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+
+
+# Function to unstretch an image
+def unstretch_image(image, original_medians, original_min):
+    is_single_channel = (image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1))
+
+    if is_single_channel:
+        channel_median = np.median(image)
+        if channel_median != 0 and original_medians[0] != 0:
+            image = ((channel_median - 1) * original_medians[0] * image) / (
+                channel_median * (original_medians[0] + image - 1) - original_medians[0] * image
             )
-        else:
-            print(f"Channel {c} - Skipping unstretch due to zero median.")
+    else:
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            if channel_median != 0 and original_medians[c] != 0:
+                image[..., c] = ((channel_median - 1) * original_medians[c] * image[..., c]) / (
+                    channel_median * (original_medians[c] + image[..., c] - 1) - original_medians[c] * image[..., c]
+                )
+            else:
+                print(f"Channel {c} - Skipping unstretch due to zero median.")
+
     image += original_min
     image = np.clip(image, 0, 1)
-    if was_single_channel:
-        image = np.mean(image, axis=2, keepdims=True)
+
     return image
+
 
 ##########################################
 # 3. Other Utility Functions
@@ -814,30 +826,18 @@ class SuperResolutionCNN(nn.Module):
 def load_superres_model(scale, model_dir):
     """
     Load the super-resolution model for the given scale and model directory.
-    Supports PyTorch and ONNX fallback, with PyInstaller compatibility.
-    """
-    import sys
 
-    # 🛠 Make model_dir work with PyInstaller --onefile
-    try:
-        if hasattr(sys, "_MEIPASS"):
-            model_dir = sys._MEIPASS
-    except Exception:
-        pass
-    """
-    Load the super-resolution model for the given scale and model directory.
-    
     On Windows:
       - If CUDA is available, load the PyTorch .pth model.
       - Otherwise, if ONNX runtime has DirectML available, load the ONNX model.
       - Otherwise, fall back on CPU PyTorch.
-      
+
     On Linux:
       - Use CUDA if available, else CPU.
-      
+
     On macOS:
       - Use MPS if available, else CPU.
-      
+
     Returns:
         (model, device, use_pytorch) where use_pytorch is a bool.
     """
@@ -907,6 +907,8 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
     if load_result[0] is None:
         return None, None, None, None, None
     image, original_header, bit_depth, is_mono = load_result
+    is_mono = (image.ndim == 2) or (image.ndim == 3 and image.shape[2] == 1)
+
     print(f"Loaded image: shape={image.shape}, bit depth={bit_depth}-bit, mono={is_mono}")
     ext = os.path.splitext(input_path)[1].lower().strip('.')
 
@@ -916,7 +918,8 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
         # Add border and stretch
         channel_border = add_border(channel_image, border_size=16)
 
-        stretched, orig_min, orig_medians = stretch_image_custom(channel_border)
+        stretched, orig_min, orig_medians = stretch_image(channel_border)
+        #stretched = channel_border
 
 
         # Upscale using bicubic interpolation
@@ -933,7 +936,12 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
             ph, pw = patch.shape[:2]
             # Prepare patch input for network: duplicate single channel to 3 channels
             patch_input = np.zeros((256, 256, 3), dtype=np.float32)
-            patch_input[:ph, :pw, :] = np.repeat(patch[..., np.newaxis], 3, axis=2)
+            patch = np.squeeze(patch)  # removes dimensions of size 1
+            if patch.ndim != 2:
+                raise ValueError(f"Unexpected patch shape: {patch.shape}")
+
+            patch_input[:ph, :pw, :] = np.repeat(patch[:, :, np.newaxis], 3, axis=2)
+
 
 
             # Process the patch with the model
@@ -969,7 +977,7 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
             processed_chunks, upscaled.shape[:2], chunk_size=256, overlap=64, border_size=16
         )
 
-        unstretched = unstretch_image_custom(stitched, orig_medians, orig_min)
+        unstretched = unstretch_image(stitched, orig_medians, orig_min)
 
         border = int(16 * scale)
         final_channel = remove_border(unstretched, border_size=border)
@@ -1168,7 +1176,7 @@ class UpscalingApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(resource_path("upscale.png")))
-    parser = argparse.ArgumentParser(description="Cosmic Clarity Super-Resolution Upscaling Tool")
+    parser = argparse.ArgumentParser(description="Cosmic Clarity Super-Resolution Upscaling Tool V1.1")
     parser.add_argument("--input", type=str, help="Path to input image")
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--scale", type=int, choices=[2,3,4], help="Upscale factor: 2, 3, or 4")
