@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity01.13.2025.zip" sha1="795f3d104a32b289fd23c4c1da5cca606751af70" type="script" releaseDate="20240113">
+      <package fileName="SetiAstroCosmicClarity03.22.2025.zip" sha1="5bcdf7da076a077c288b2e644147939b9acb6296" type="script" releaseDate="20240322">
          <title>
-        Cosmic Clarity Satellite V1.4
+        Cosmic Clarity Super Resolution V1.0
       </title>
          <description>
             <p>
-Added Clipping Sensitivity as well as fixed a bug where unchecking clip trail to 0.000 did not pass that unchecked argument to Cosmic Clarity properly
+Script to interface with Cosmic Clarity Super Resolution.  Be sure to use the wrench icon to tell it where the Cosmic Clarity parent folder is!
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2025-01-13T13:30:10.153Z" encoding="Base64">Z8m74k2pSXQfchNYfrn9DduOSxthUg523vvanc7A7xS7vaB0UZ6QolusUN6bHTnIM9EgPnTCnOD6ivFwzMEzBQ==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2025-03-22T19:48:29.692Z" encoding="Base64">ReB0MzMUlSPiu+MjdK4jdFsUlsYsbBBg9OyS3P6Y3DTPH2htWdYmWCux2N3lAQ6kQ5z45hn6dcbsfeoXIkjACw==</Signature>
