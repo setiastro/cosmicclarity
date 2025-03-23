@@ -18,7 +18,7 @@ from tkinter import simpledialog, messagebox
 from tkinter import ttk
 import argparse  # For command-line argument parsing
 import onnxruntime as ort
-
+sys.stdout.reconfigure(encoding='utf-8')
 
 
 
@@ -151,7 +151,7 @@ def load_models(exe_dir, use_gpu=True):
         denoise_model = DenoiseCNN().to(device)
 
         # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3.pth"), map_location=device)
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.pth"), map_location=device)
         if "model_state_dict" in checkpoint:
             denoise_model.load_state_dict(checkpoint["model_state_dict"])
         else:
@@ -172,7 +172,7 @@ def load_models(exe_dir, use_gpu=True):
         device = "DirectML"
 
         denoise_model = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_denoise_cnn_AI3.onnx"),
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.onnx"),
             providers=["DmlExecutionProvider"]
         )
 
@@ -191,7 +191,7 @@ def load_models(exe_dir, use_gpu=True):
         denoise_model = DenoiseCNN().to(device)
 
         # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3.pth"), map_location=device)
+        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.pth"), map_location=device)
         if "model_state_dict" in checkpoint:
             denoise_model.load_state_dict(checkpoint["model_state_dict"])
         else:
@@ -288,6 +288,9 @@ def generate_blend_weights(chunk_size, overlap):
 
 # Function to stitch overlapping chunks back together with soft blending while ignoring borders for all chunks
 def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border_size=16):
+    print(f"Number of chunks: {len(chunks)}")
+    print(f"First few chunks: {[type(c) if not isinstance(c, tuple) else len(c) for c in chunks[:3]]}")
+
     stitched_image = np.zeros(image_shape, dtype=np.float32)
     weight_map = np.zeros(image_shape, dtype=np.float32)  # Track blending weights
     
@@ -565,28 +568,40 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                     print("Identified 32bit unsigned FITS image.")
                 
                 # Handle 3D FITS data (e.g., RGB or multi-layered data)
-                if image_data.ndim == 3 and image_data.shape[0] == 3:
-                    image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
+                if image_data.ndim == 3:
+                    print(f"Detected 3D FITS data with shape: {image_data.shape}")
                     
-                    if bit_depth == "16-bit":
-                        image = image.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
-                    elif bit_depth == "32-bit unsigned":
-                        # Apply BSCALE and BZERO if present
-                        bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
-                        bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
+                    if image_data.shape[0] == 3:
+                        # Assume RGB in (3, H, W) format
+                        image = np.transpose(image_data, (1, 2, 0))  # Convert to (H, W, 3)
+                        
+                        if bit_depth == "16-bit":
+                            image = image.astype(np.float32) / 65535.0
+                        elif bit_depth == "32-bit unsigned":
+                            bzero = original_header.get('BZERO', 0)
+                            bscale = original_header.get('BSCALE', 1)
+                            image = image.astype(np.float32) * bscale + bzero
+                            image_min = image.min()
+                            image_max = image.max()
+                            image = (image - image_min) / (image_max - image_min)
+                            print(f"Image range after applying BZERO and BSCALE (RGB): min={image_min}, max={image_max}")
+                        # No need to normalize float32
+                        is_mono = False
 
-                        # Convert to float and apply the scaling and offset
-                        image = image.astype(np.float32) * bscale + bzero
+                    elif image_data.shape[0] == 1:
+                        # Single-channel mono FITS in (1, H, W) format
+                        image = image_data[0]  # Drop channel dim, now (H, W)
+                        image = np.stack([image] * 3, axis=-1)  # Convert to RGB shape (H, W, 3)
+                        is_mono = True
 
-                        # Normalize based on the actual data range
-                        image_min = image.min()  # Get the min value after applying BZERO
-                        image_max = image.max()  # Get the max value after applying BZERO
+                    elif image_data.shape[2] == 1:
+                        # Shape (H, W, 1) — mono with trailing singleton dim
+                        image = image_data[:, :, 0]
+                        image = np.stack([image] * 3, axis=-1)
+                        is_mono = True
 
-                        # Normalize the image data to the range [0, 1]
-                        image = (image - image_min) / (image_max - image_min)
-                        print(f"Image range after applying BZERO and BSCALE (3D case): min={image_min}, max={image_max}")
-
-                    is_mono = False  # RGB data
+                    else:
+                        raise ValueError(f"Unsupported 3D FITS shape: {image_data.shape}")
 
                 # Handle 2D FITS data (grayscale)
                 elif image_data.ndim == 2:
@@ -757,9 +772,19 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
 
+    # Debug: validate chunk structure
+    for idx, entry in enumerate(chunks[:3]):
+        print(f"Chunk {idx} type: {type(entry)}, length: {len(entry) if isinstance(entry, tuple) else 'N/A'}")
+
     denoised_chunks = []
 
-    for idx, (chunk, i, j) in enumerate(chunks):
+    for idx, entry in enumerate(chunks):
+        try:
+            chunk, i, j = entry
+        except Exception as e:
+            print(f"❌ Failed to unpack chunk {idx}: {entry} ({e})")
+            continue
+
         original_chunk_shape = chunk.shape
         if is_onnx:
             # Prepare ONNX input: Expand to 3 channels
@@ -768,41 +793,57 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
 
             # Pad the chunk to 256x256 if necessary
             if chunk_input.shape[2] != chunk_size or chunk_input.shape[3] != chunk_size:
-                padded_chunk = np.zeros((1, 3, chunk_size, chunk_size), dtype=np.float32)  # Create empty padded array
-                padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input  # Copy data into padded array
+                padded_chunk = np.zeros((1, 3, chunk_size, chunk_size), dtype=np.float32)
+                padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input
                 chunk_input = padded_chunk
 
             # ONNX inference
             input_name = model.get_inputs()[0].name
             try:
-                denoised_chunk = model.run(None, {input_name: chunk_input})[0]  # Run ONNX model
-                denoised_chunk = denoised_chunk[0, 0, :original_chunk_shape[0], :original_chunk_shape[1]]  # Crop back to original size
+                denoised_chunk = model.run(None, {input_name: chunk_input})[0]
+                denoised_chunk = denoised_chunk[0, 0, :original_chunk_shape[0], :original_chunk_shape[1]]
             except Exception as e:
                 print(f"ONNX inference error for chunk at ({i}, {j}): {e}")
-                raise
+                continue
+
         else:
             # Prepare PyTorch input
             chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
             if not is_mono:
-                chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Expand to 3 channels for RGB models
+                chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)
             else:
-                # For grayscale images, explicitly expand to 3 channels
                 chunk_tensor = chunk_tensor.expand(1, 3, chunk_tensor.shape[2], chunk_tensor.shape[3])
 
             # PyTorch inference
-            with torch.no_grad():
-                denoised_chunk = model(chunk_tensor).squeeze().cpu().numpy()[0]  # Use only the first output channel
+            try:
+                with torch.no_grad():
+                    with torch.cuda.amp.autocast():
+                        denoised_output = model(chunk_tensor).squeeze().cpu().numpy()
+                        if denoised_output.ndim == 3:
+                            denoised_chunk = denoised_output[0]  # Take first channel
+                        else:
+                            denoised_chunk = denoised_output
+            except Exception as e:
+                print(f"PyTorch inference error for chunk at ({i}, {j}): {e}")
+                continue
 
-        denoised_chunks.append((denoised_chunk, i, j))
+        if denoised_chunk is not None:
+            denoised_chunks.append((denoised_chunk, i, j))
+        else:
+            print(f"⚠️ Warning: Denoised chunk at ({i}, {j}) is None — skipping")
 
         # Show progress update
         show_progress(idx + 1, len(chunks))
 
+    # Debug: final validation before stitching
+    if not all(isinstance(entry, tuple) and len(entry) == 3 for entry in denoised_chunks):
+        print("❗ Error: One or more denoised chunks are malformed before stitching!")
+
     # Stitch the chunks back together
-    
     denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
-    
+
     return denoised_channel
+
 
 
 
@@ -815,10 +856,10 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V6.3 AI3                   # 
+ *#              Cosmic Clarity - Denoise V6.5 AI3.5                 # 
  *#                                                                  #
  *#                         SetiAstro                                #
- *#                    Copyright © 2024                              #
+ *#                    Copyright © 2025                              #
  *#                                                                  #
         """))
 
@@ -840,6 +881,10 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     # Process each image in the input directory
     for image_name in os.listdir(input_dir):
         image_path = os.path.join(input_dir, image_name)
+        # Skip hidden/system files and non-image files
+        if not any(image_name.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.fits', '.fit', '.xisf']):
+            print(f"Skipping non-image file: {image_name}")
+            continue
         denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta = denoise_image(
             image_path, 
             denoise_strength, 
