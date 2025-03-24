@@ -638,6 +638,7 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 ##########################################
 # 2. Stretch / Unstretch Functions
 ##########################################
+# Function to stretch an image
 def stretch_image(image):
     original_min = np.min(image)
     stretched_image = image - original_min
@@ -693,6 +694,7 @@ def unstretch_image(image, original_medians, original_min):
     image = np.clip(image, 0, 1)
 
     return image
+
 
 ##########################################
 # 3. Other Utility Functions
@@ -824,46 +826,35 @@ class SuperResolutionCNN(nn.Module):
 def load_superres_model(scale, model_dir):
     """
     Load the super-resolution model for the given scale and model directory.
-    Supports PyTorch and ONNX fallback, with PyInstaller compatibility.
-    """
-    import sys
 
-    # 🛠 Make model_dir work with PyInstaller --onefile
-    try:
-        if hasattr(sys, "_MEIPASS"):
-            model_dir = sys._MEIPASS
-    except Exception:
-        pass
-    """
-    Load the super-resolution model for the given scale and model directory.
-    
     On Windows:
       - If CUDA is available, load the PyTorch .pth model.
       - Otherwise, if ONNX runtime has DirectML available, load the ONNX model.
       - Otherwise, fall back on CPU PyTorch.
-      
+
     On Linux:
       - Use CUDA if available, else CPU.
-      
+
     On macOS:
       - Use MPS if available, else CPU.
-      
+
     Returns:
         (model, device, use_pytorch) where use_pytorch is a bool.
     """
     import sys
     if sys.platform.startswith("win"):
         if torch.cuda.is_available():
+            print("Using device: CUDA (PyTorch)")
             device = torch.device("cuda")
             use_pytorch = True
+        elif "DmlExecutionProvider" in ort.get_available_providers():
+            print("Using DirectML for ONNX Runtime.")
+            device = "DirectML"
+            use_pytorch = False
         else:
-            providers = ort.get_available_providers()
-            if "DmlExecutionProvider" in providers:
-                device = "DirectML"
-                use_pytorch = False
-            else:
-                device = torch.device("cpu")
-                use_pytorch = True
+            print("Using device: CPU (PyTorch)")
+            device = torch.device("cpu")
+            use_pytorch = True
     elif sys.platform.startswith("linux"):
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -976,6 +967,11 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
 
             # Crop to original patch size
             out_np = out_np[:ph, :pw]
+            # Debugging output range check
+            if np.all(out_np == 0):
+                print(f"[WARNING] All-zero output for chunk ({i}, {j}) at index {idx}")
+            if np.isnan(out_np).any():
+                print(f"[WARNING] NaN detected in output for chunk ({i}, {j}) at index {idx}")
 
             processed_chunks.append((out_np, i, j, is_edge))
 
@@ -986,8 +982,10 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
         stitched = stitch_chunks_ignore_border(
             processed_chunks, upscaled.shape[:2], chunk_size=256, overlap=64, border_size=16
         )
+        print(f"[DEBUG] Post-stitch: min={stitched.min()}, max={stitched.max()}")
 
         unstretched = unstretch_image(stitched, orig_medians, orig_min)
+        print(f"[DEBUG] Post-unstretch: min={unstretched.min()}, max={unstretched.max()}")
 
         border = int(16 * scale)
         final_channel = remove_border(unstretched, border_size=border)
@@ -1000,6 +998,7 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
 
     if is_mono:
         final = process_single_channel(image)
+        print(f"[DEBUG] Final mono result: shape={final.shape}, min={final.min()}, max={final.max()}")        
 
     else:
         final_channels = []
@@ -1007,10 +1006,12 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
             print(f"\n[DEBUG] Processing color channel {c+1}/3")
             channel_result = process_single_channel(image[..., c])
             print(f"[DEBUG] Color channel {c+1} result shape: {channel_result.shape}")
+            print(f"[DEBUG] Channel {c+1} min/max: {channel_result.min()} / {channel_result.max()}")
             final_channels.append(channel_result)
         # Combine channels into final RGB image
         final = np.stack(final_channels, axis=-1)
         print(f"[DEBUG] Final RGB image shape after stacking: {final.shape}")
+        print(f"[DEBUG] Final RGB min/max: {final.min()} / {final.max()}")
 
     return final, original_header, bit_depth, ext, is_mono
 
@@ -1040,7 +1041,7 @@ class UpscalingApp(QMainWindow):
         self.model = model
         self.device = device
         self.use_pytorch = use_pytorch  # Save the flag for later use
-        self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool")
+        self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool V1.2")
         self.setWindowIcon(QIcon(resource_path("upscale.ico")))
         self.resize(600, 300)
         self.initUI()
