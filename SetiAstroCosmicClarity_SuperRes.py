@@ -904,6 +904,19 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
       - Stitches patches back together, unstretches the result, and removes the border
     Returns the final image as a NumPy array in [0,1].
     """
+    use_amp = False
+    if use_pytorch and torch.cuda.is_available() and device and isinstance(device, torch.device):
+        try:
+            props = torch.cuda.get_device_properties(device)
+            compute_capability = float(f"{props.major}.{props.minor}")
+            print(f"[INFO] CUDA Compute Capability: {compute_capability}")
+            if compute_capability >= 7.0:
+                use_amp = True
+            else:
+                print("[WARNING] Compute capability too low for reliable AMP. Disabling mixed precision.")
+        except Exception as e:
+            print(f"[WARNING] Could not determine compute capability: {e}")
+
     load_result = load_image(input_path)
     if load_result[0] is None:
         return None, None, None, None, None
@@ -948,7 +961,7 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
             # Process the patch with the model
             if use_pytorch:
                 patch_tensor = torch.from_numpy(patch_input.transpose(2, 0, 1)).unsqueeze(0).to(device)
-                with torch.amp.autocast('cuda', enabled=(device.type == 'cuda' if device else False)):
+                with torch.amp.autocast('cuda', enabled=use_amp):
                     output = model(patch_tensor)
                 out_np = output.squeeze().detach().cpu().numpy()
             else:
@@ -1041,7 +1054,7 @@ class UpscalingApp(QMainWindow):
         self.model = model
         self.device = device
         self.use_pytorch = use_pytorch  # Save the flag for later use
-        self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool V1.2")
+        self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool V1.3")
         self.setWindowIcon(QIcon(resource_path("upscale.ico")))
         self.resize(600, 300)
         self.initUI()
