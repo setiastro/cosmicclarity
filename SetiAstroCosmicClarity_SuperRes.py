@@ -910,7 +910,7 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
             props = torch.cuda.get_device_properties(device)
             compute_capability = float(f"{props.major}.{props.minor}")
             print(f"[INFO] CUDA Compute Capability: {compute_capability}")
-            if compute_capability >= 7.0:
+            if compute_capability >= 8.0:
                 use_amp = True
             else:
                 print("[WARNING] Compute capability too low for reliable AMP. Disabling mixed precision.")
@@ -932,8 +932,12 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
         # Add border and stretch
         channel_border = add_border(channel_image, border_size=16)
 
-        stretched, orig_min, orig_medians = stretch_image(channel_border)
-        #stretched = channel_border
+        # Only stretch if the image is "linear"
+        if np.median(channel_border) < 0.08:
+            stretched, orig_min, orig_medians = stretch_image(channel_border)
+        else:
+            # If not linear enough, skip stretching
+            stretched = channel_border
 
 
         # Upscale using bicubic interpolation
@@ -1054,7 +1058,7 @@ class UpscalingApp(QMainWindow):
         self.model = model
         self.device = device
         self.use_pytorch = use_pytorch  # Save the flag for later use
-        self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool V1.3")
+        self.setWindowTitle("Cosmic Clarity Super-Resolution Upscaling Tool V1.4")
         self.setWindowIcon(QIcon(resource_path("upscale.ico")))
         self.resize(600, 300)
         self.initUI()
@@ -1221,10 +1225,10 @@ def main():
             final_img, orig_hdr, bd, orig_fmt, mono = result
             base = os.path.splitext(os.path.basename(args.input))[0]
             suffix = f"_upscaled{int(args.scale)}x"
-            out_type = "tif"  # explicitly TIFF format
+            out_type = "fit"  # explicitly TIFF format
             output_filename = os.path.join(os.path.abspath(args.output_dir), base + suffix + "." + out_type)
             try:
-                save_image(final_img, output_filename, "tiff", bit_depth="32-bit floating point", original_header=orig_hdr, is_mono=mono)
+                save_image(final_img, output_filename, "fit", bit_depth="32-bit floating point", original_header=orig_hdr, is_mono=mono)
                 print(f"\nSaved upscaled image to {output_filename}")
             except Exception as e:
                 print(f"Error saving image: {e}")
