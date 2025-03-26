@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity03.22.2025.zip" sha1="5bcdf7da076a077c288b2e644147939b9acb6296" type="script" releaseDate="20240322">
+      <package fileName="SetiAstroCosmicClarity03.26.2025.zip" sha1="8f4628df479374de9f5ad9c676fc0ba0d0358055" type="script" releaseDate="20240326">
          <title>
-        Cosmic Clarity Super Resolution V1.0
+        Cosmic Clarity Super Resolution V1.1
       </title>
          <description>
             <p>
-Script to interface with Cosmic Clarity Super Resolution.  Be sure to use the wrench icon to tell it where the Cosmic Clarity parent folder is!
+Script to interface with Cosmic Clarity Super Resolution.  Be sure to update your Cosmic Clarity prior to using this script
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2025-03-22T19:48:29.692Z" encoding="Base64">ReB0MzMUlSPiu+MjdK4jdFsUlsYsbBBg9OyS3P6Y3DTPH2htWdYmWCux2N3lAQ6kQ5z45hn6dcbsfeoXIkjACw==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2025-03-26T16:11:58.370Z" encoding="Base64">Whnier/VkfFuQB/qroiT1Z0AIOm27JI2Bl2djI4pq4lsb7xhDtGR1owIDxgziSjB6nDDVjTBK8bZO9r8mJUVCg==</Signature>
