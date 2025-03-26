@@ -932,12 +932,13 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
         # Add border and stretch
         channel_border = add_border(channel_image, border_size=16)
 
-        # Only stretch if the image is "linear"
+        # Check if image is linear enough to stretch
         if np.median(channel_border) < 0.08:
             stretched, orig_min, orig_medians = stretch_image(channel_border)
+            stretched_applied = True
         else:
-            # If not linear enough, skip stretching
             stretched = channel_border
+            stretched_applied = False
 
 
         # Upscale using bicubic interpolation
@@ -1001,8 +1002,12 @@ def process_image(input_path, scale, model, device, use_pytorch, progress_callba
         )
         print(f"[DEBUG] Post-stitch: min={stitched.min()}, max={stitched.max()}")
 
-        unstretched = unstretch_image(stitched, orig_medians, orig_min)
-        print(f"[DEBUG] Post-unstretch: min={unstretched.min()}, max={unstretched.max()}")
+        if stretched_applied:
+            unstretched = unstretch_image(stitched, orig_medians, orig_min)
+            print(f"[DEBUG] Post-unstretch: min={unstretched.min()}, max={unstretched.max()}")
+        else:
+            unstretched = stitched
+            print("[DEBUG] No unstretching applied")
 
         border = int(16 * scale)
         final_channel = remove_border(unstretched, border_size=border)
