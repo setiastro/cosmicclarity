@@ -1,3 +1,4 @@
+# patch_torch.py
 import warnings
 from xisf import XISF
 import os
@@ -16,10 +17,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
+try:
+    # Check if the attribute exists; if not, set it to a dummy value
+    if not hasattr(torch._C._distributed_c10d.BackendType, 'XCCL'):
+        setattr(torch._C._distributed_c10d.BackendType, 'XCCL', None)
+except Exception:
+    # If any error occurs, pass silently so it doesn't impact execution
+    pass
 
-# Define the starremovalCNN model with adjusted convolutional layers
-import torch
-import torch.nn as nn
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
@@ -121,6 +127,9 @@ class CascadedStarRemovalNetCombined(nn.Module):
             new_state_dict1[new_key] = value
         self.stage1.load_state_dict(new_state_dict1)
         
+        # ---------------------------------------------------------------------------
+        # Stage 2 code commented out for now.
+        """
         # Load Stage 2 weights (if you need it) and remove prefixes.
         self.stage2 = SuperResolutionCNN()
         state_dict2 = torch.load(stage2_path, map_location=map_fn)
@@ -134,10 +143,13 @@ class CascadedStarRemovalNetCombined(nn.Module):
                 new_key = key
             new_state_dict2[new_key] = value
         self.stage2.load_state_dict(new_state_dict2)
+        """
+        # ---------------------------------------------------------------------------
     
     def forward(self, x):
         coarse = self.stage1(x)
-        #refined = self.stage2(coarse)
+        # The Stage 2 refinement is currently disabled.
+        # refined = self.stage2(coarse)
         return coarse
 
 
@@ -150,12 +162,14 @@ def load_model(exe_dir, use_gpu=True):
     device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Specify paths for Stage 1 and Stage 2 weights.
+    # Specify path for Stage 1 weights.
     stage1_path = os.path.join(exe_dir, 'darkstar_v1.pth')
-    stage2_path = os.path.join(exe_dir, 'darkstar_V2.pth')
+    # Stage 2 weights path is commented out until needed.
+    # stage2_path = os.path.join(exe_dir, 'darkstar_v2.pth')
     
     # Initialize the cascaded model.
-    starremoval_model = CascadedStarRemovalNetCombined(stage1_path, stage2_path)
+    # Since Stage 2 is disabled, a dummy value (None) is passed for stage2_path.
+    starremoval_model = CascadedStarRemovalNetCombined(stage1_path, None)
     starremoval_model.eval()
     starremoval_model.to(device)
     
@@ -163,6 +177,7 @@ def load_model(exe_dir, use_gpu=True):
         "starremoval_model": starremoval_model,
         "device": device
     }
+
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -705,7 +720,7 @@ def process_images(input_dir, output_dir, starremoval_strength=None, use_gpu=Tru
         )
 
         if starless_image is not None:
-            output_image_name = os.path.splitext(image_name)[0] #+ "_starless"
+            output_image_name = os.path.splitext(image_name)[0] + "_starless"
             output_image_path = os.path.join(output_dir, output_image_name + file_extension)
             actual_bit_depth = bit_depth
 
