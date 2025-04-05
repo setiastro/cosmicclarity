@@ -678,13 +678,17 @@ def starremoval_image(image_path, starremoval_strength, device, model, border_si
                     if progress_callback:
                         progress_callback(f"Processing channel {ch + 1}/3")
                     channel_data = stretched_image[..., ch]
-                    channel_input = np.stack([channel_data] * 3, axis=-1)
+                    # Duplicate the single channel to create a 3-channel image for model input
+                    channel_input = np.stack([channel_data] * 3, axis=-1)  # shape (H, W, 3)
                     chunks = split_image_into_chunks_with_overlap(channel_input, chunk_size, overlap)
                     channel_starless = process_chunks(chunks, channel_input.shape)
                     if original_min is not None:
                         channel_starless = unstretch_image(channel_starless, original_median, original_min)
-                    channel_starless_final = channel_starless[5:5 + original_image.shape[0], 5:5 + original_image.shape[1]]
+                    # Crop the border; now take only one channel (e.g., channel 0) as the final processed channel
+                    channel_starless_final = channel_starless[5:5 + original_image.shape[0],
+                                                                5:5 + original_image.shape[1], 0]
                     processed_channels.append(channel_starless_final)
+                # Stack the three processed channels to obtain a final output with shape (height, width, 3)
                 final_starless = np.stack(processed_channels, axis=-1)
         else:
             raise ValueError("Unsupported image format.")
