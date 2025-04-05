@@ -915,14 +915,21 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         use_gpu = not args.disable_gpu
+
+        # 👇 ADD THIS
+        def cli_progress_callback(message):
+            print(message, flush=True)
+
         process_images(
             input_dir, output_dir,
             starremoval_strength=1.0,
             use_gpu=use_gpu,
             star_removal_mode=args.star_removal_mode,
-            show_extracted_stars=args.show_extracted_stars
+            show_extracted_stars=args.show_extracted_stars,
+            progress_callback=cli_progress_callback  # 👈 Use callback that prints with flush
         )
         sys.exit(0)
+
     else:
         # GUI mode: launch interactive UI
         app = QApplication(sys.argv)
