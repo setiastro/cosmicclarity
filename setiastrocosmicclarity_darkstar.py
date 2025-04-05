@@ -158,8 +158,17 @@ exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else 
 
 def load_model(exe_dir, use_gpu=True):
     print(torch.__version__)
-    print(torch.cuda.is_available())
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
+    
+    if use_gpu:
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+    else:
+        device = torch.device("cpu")
+    
     print(f"Using device: {device}")
     
     # Specify path for Stage 1 weights.
@@ -177,6 +186,7 @@ def load_model(exe_dir, use_gpu=True):
         "starremoval_model": starremoval_model,
         "device": device
     }
+
 
 
 # Function to split an image into chunks with overlap
