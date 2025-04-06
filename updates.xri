@@ -6,16 +6,16 @@
     </p>
    </description>
    <platform os="all" arch="noarch" version="1.8.8:1.9.9">
-      <package fileName="SetiAstroCosmicClarity03.26.2025.zip" sha1="8f4628df479374de9f5ad9c676fc0ba0d0358055" type="script" releaseDate="20240326">
+      <package fileName="SetiAstroCosmicClarity04.06.2025.zip" sha1="d8195e80fdb16add7240341f22c04eb353f85d0b" type="script" releaseDate="20240406">
          <title>
-        Cosmic Clarity Super Resolution V1.1
+        Cosmic Clarity Dark Star V1.0
       </title>
          <description>
             <p>
-Script to interface with Cosmic Clarity Super Resolution.  Be sure to update your Cosmic Clarity prior to using this script
+Script to interface with Cosmic Clarity Dark Star.  Be sure to update your Cosmic Clarity prior to using this script
 		</p>
          </description>
       </package>
    </platform>
 </xri>
-<Signature developerId="FranklinMarek" timestamp="2025-03-26T16:11:58.370Z" encoding="Base64">Whnier/VkfFuQB/qroiT1Z0AIOm27JI2Bl2djI4pq4lsb7xhDtGR1owIDxgziSjB6nDDVjTBK8bZO9r8mJUVCg==</Signature>
+<Signature developerId="FranklinMarek" timestamp="2025-04-06T21:34:59.760Z" encoding="Base64">oFbSlKQTNkyDLqOngml9hOOKxjKaVJNDT3xbFTqoXcRYJKIj/mq0i37LGTQgkx3JvG0QIfd+kHV105/RPIPHBw==</Signature>
