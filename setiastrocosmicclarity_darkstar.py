@@ -1,30 +1,37 @@
-# patch_torch.py
 import warnings
 from xisf import XISF
 import os
 import sys
 import torch
 import numpy as np
+import lz4.block
+import zstandard
+import base64
+import ast
+import platform
 import torch.nn as nn
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
+import tkinter as tk
+from tkinter import simpledialog, messagebox
 import argparse  # For command-line argument parsing
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout, QPushButton,
-    QComboBox, QCheckBox
-)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+import time  # For simulating progress updates
+from tkinter import ttk
+from tkinter import filedialog
+import onnxruntime as ort
+sys.stdout.reconfigure(encoding='utf-8')
+
+#torch.cuda.is_available = lambda: False
+
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
-try:
-    # Check if the attribute exists; if not, set it to a dummy value
-    if not hasattr(torch._C._distributed_c10d.BackendType, 'XCCL'):
-        setattr(torch._C._distributed_c10d.BackendType, 'XCCL', None)
-except Exception:
-    # If any error occurs, pass silently so it doesn't impact execution
-    pass
-
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout, QPushButton,
+    QComboBox, QCheckBox, QSpinBox
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QPixmap, QFont
 
 
 class ResidualBlock(nn.Module):
@@ -158,21 +165,12 @@ exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else 
 
 def load_model(exe_dir, use_gpu=True):
     print(torch.__version__)
-    
-    if use_gpu:
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
-    else:
-        device = torch.device("cpu")
-    
+    print(torch.cuda.is_available())
+    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Specify path for Stage 1 weights.
-    stage1_path = os.path.join(exe_dir, 'darkstar_v1.pth')
+    stage1_path = os.path.join(exe_dir, 'darkstar_v1.5stridenormalizedoneshot.pth')  #darkstar_v1.5stridenormalized.pth
     # Stage 2 weights path is commented out until needed.
     # stage2_path = os.path.join(exe_dir, 'darkstar_v2.pth')
     
@@ -186,7 +184,6 @@ def load_model(exe_dir, use_gpu=True):
         "starremoval_model": starremoval_model,
         "device": device
     }
-
 
 
 # Function to split an image into chunks with overlap
@@ -275,17 +272,21 @@ class ProcessingThread(QThread):
         self.use_gpu = use_gpu
         self.star_removal_mode = star_removal_mode
         self.show_extracted_stars = show_extracted_stars
+        # Default values; these will be overwritten from the UI if needed.
+        self.chunk_size = 512
+        self.overlap = int(round(0.125 * self.chunk_size))
 
     def run(self):
         def progress_callback(message):
             self.progress_signal.emit(message)
-
         process_images(
             self.input_dir,
             self.output_dir,
             use_gpu=self.use_gpu,
             star_removal_mode=self.star_removal_mode,
             show_extracted_stars=self.show_extracted_stars,
+            chunk_size=self.chunk_size,
+            overlap=self.overlap,
             progress_callback=progress_callback
         )
         self.finished_signal.emit()
@@ -300,6 +301,7 @@ class StarRemovalUI(QMainWindow):
         self.star_removal_mode = "unscreen"
         self.show_extracted_stars = False
 
+        self.chunk_size_default = 512  # default chunk size
         self.init_ui()
 
     def init_ui(self):
@@ -307,19 +309,40 @@ class StarRemovalUI(QMainWindow):
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
+        # GPU dropdown
         self.gpu_dropdown = QComboBox()
         self.gpu_dropdown.addItems(["Yes", "No"])
         layout.addWidget(QLabel("Use GPU Acceleration:"))
         layout.addWidget(self.gpu_dropdown)
 
+        # Mode dropdown
         self.mode_dropdown = QComboBox()
         self.mode_dropdown.addItems(["unscreen", "additive"])
         layout.addWidget(QLabel("Star Removal Mode:"))
         layout.addWidget(self.mode_dropdown)
 
+        # Checkbox to show extracted stars
         self.stars_checkbox = QCheckBox("Show Extracted Stars")
         layout.addWidget(self.stars_checkbox)
 
+        # Add chunk size control
+        self.chunk_size_spinbox = QSpinBox()
+        self.chunk_size_spinbox.setMinimum(128)
+        self.chunk_size_spinbox.setMaximum(4096)
+        self.chunk_size_spinbox.setSingleStep(64)
+        self.chunk_size_spinbox.setValue(self.chunk_size_default)
+        layout.addWidget(QLabel("Chunk Size (pixels):"))
+        layout.addWidget(self.chunk_size_spinbox)
+
+        # Add a label to display the computed overlap.
+        overlap = int(round(0.125 * self.chunk_size_spinbox.value()))
+        self.overlap_label = QLabel(f"Overlap: {overlap} pixels")
+        layout.addWidget(self.overlap_label)
+
+        # Update overlap when the chunk size changes.
+        self.chunk_size_spinbox.valueChanged.connect(self.update_overlap_label)
+
+        # Start Processing Button
         self.start_button = QPushButton("Start Processing")
         self.start_button.clicked.connect(self.start_processing)
         layout.addWidget(self.start_button)
@@ -327,6 +350,11 @@ class StarRemovalUI(QMainWindow):
         self.progress_label = QLabel("Ready.")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.progress_label)
+
+    def update_overlap_label(self):
+        chunk_size = self.chunk_size_spinbox.value()
+        overlap = int(round(0.125 * chunk_size))
+        self.overlap_label.setText(f"Overlap: {overlap} pixels")
 
     def start_processing(self):
         self.use_gpu = self.gpu_dropdown.currentText() == "Yes"
@@ -341,15 +369,27 @@ class StarRemovalUI(QMainWindow):
         input_dir = os.path.join(exe_dir, 'input')
         output_dir = os.path.join(exe_dir, 'output')
 
+        # Extract chunk_size from UI and compute overlap
+        chunk_size = self.chunk_size_spinbox.value()
+        overlap = int(round(0.125 * chunk_size))
+
         self.thread = ProcessingThread(
             input_dir=input_dir,
             output_dir=output_dir,
             use_gpu=self.use_gpu,
             star_removal_mode=self.star_removal_mode,
-            show_extracted_stars=self.show_extracted_stars
+            show_extracted_stars=self.show_extracted_stars,
+            # You can add additional parameters here by modifying your ProcessingThread to pass them.
         )
 
+        # Pass chunk_size and overlap via a lambda or by modifying your process_images signature.
         self.thread.progress_signal.connect(self.progress_label.setText)
+
+        # Here we modify the ProcessingThread (or adjust process_images) so that these parameters are passed.
+        # For example, if you update ProcessingThread.run() to pass these values:
+        self.thread.chunk_size = chunk_size
+        self.thread.overlap = overlap
+
         self.thread.finished_signal.connect(lambda: self.progress_label.setText("Done!"))
         self.thread.start()
 
@@ -461,7 +501,8 @@ def remove_border(image, border_size=5):
 
 
 # Main starremoval function for an image
-def starremoval_image(image_path, starremoval_strength, device, model, border_size=16, progress_callback=None):
+def starremoval_image(image_path, starremoval_strength, device, model,
+                      border_size=16, chunk_size=512, overlap=None, progress_callback=None):
     try:
         file_extension = os.path.splitext(image_path)[1].lower()
         if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
@@ -630,19 +671,37 @@ def starremoval_image(image_path, starremoval_strength, device, model, border_si
         def process_chunks(chunks, processed_image_shape):
             starless_chunks = []
             for idx, (chunk, i, j) in enumerate(chunks):
-                chunk_tensor = torch.tensor(chunk, dtype=torch.float32)
+                # Compute patch-specific normalization parameters.
+                patch_min = chunk.min()
+                patch_max = chunk.max()
+                # Add a small constant to the denominator to avoid division by zero.
+                epsilon = 1e-8
+                # Normalize the chunk using its own min/max.
+                normalized_chunk =(chunk - patch_min) / (patch_max - patch_min + epsilon)
+                #normalized_chunk =chunk
+                
+                # Convert normalized patch to tensor and rearrange dimensions.
+                chunk_tensor = torch.tensor(normalized_chunk, dtype=torch.float32)
                 if chunk_tensor.dim() == 3:
                     chunk_tensor = chunk_tensor.unsqueeze(0)
                 chunk_tensor = chunk_tensor.permute(0, 3, 1, 2).to(device)
+                
+                # Pass the normalized patch through the model.
                 with torch.no_grad():
-                    starless_chunk = model(chunk_tensor).squeeze().cpu().numpy().transpose(1, 2, 0)
+                    normalized_output = model(chunk_tensor)
+                    # Remove batch dimension, bring back to HWC order.
+                    normalized_output = normalized_output.squeeze().cpu().numpy().transpose(1, 2, 0)
+                
+                # Reverse normalization to bring output back to the original patch's dynamic range.
+                # (Multiply by the same range and add the min value.)
+                starless_chunk = normalized_output * (patch_max - patch_min + epsilon) + patch_min
+                #starless_chunk = normalized_outpu
+                
                 starless_chunks.append((starless_chunk, i, j))
                 if progress_callback:
                     progress_callback(f"Progress: {(idx + 1) / len(chunks) * 100:.2f}% ({idx + 1}/{len(chunks)} chunks processed)")
+            
             return stitch_chunks_ignore_border(starless_chunks, processed_image_shape, chunk_size, overlap, border_size=5)
-
-        chunk_size = 256
-        overlap = 64
 
         if stretched_image.ndim == 2:
             processed_image = np.stack([stretched_image] * 3, axis=-1)
@@ -700,8 +759,9 @@ def starremoval_image(image_path, starremoval_strength, device, model, border_si
         return None, None, None, None, None, None, None
     
 # Main process for denoising images
-def process_images(input_dir, output_dir, starremoval_strength=None, use_gpu=True, star_removal_mode='additive', show_extracted_stars=False,
-                   progress_callback=None):
+def process_images(input_dir, output_dir, starremoval_strength=None,
+                   use_gpu=True, star_removal_mode='additive', show_extracted_stars=False,
+                   chunk_size=512, overlap=None, progress_callback=None):
 
     print((r"""
  *#        ___     __      ___       __                              #
@@ -709,10 +769,10 @@ def process_images(input_dir, output_dir, starremoval_strength=None, use_gpu=Tru
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Dark Star V1.0                     # 
+ *#              Cosmic Clarity - Dark Star V1.1                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
- *#                    Copyright © 2024                              #
+ *#                    Copyright © 2025                              #
  *#                                                                  #
         """))
 
@@ -730,7 +790,9 @@ def process_images(input_dir, output_dir, starremoval_strength=None, use_gpu=Tru
             progress_callback(f"Processing image {idx + 1}/{len(all_images)}: {image_name}")
 
         starless_image, original_header, bit_depth, file_extension, is_mono, file_meta, original_image = starremoval_image(
-            image_path, 1.0, models['device'], models["starremoval_model"], progress_callback=progress_callback
+            image_path, 1.0, models['device'], models["starremoval_model"],
+            border_size=16, chunk_size=chunk_size, overlap=overlap,
+            progress_callback=progress_callback
         )
 
         if starless_image is not None:
@@ -912,21 +974,31 @@ if __name__ == "__main__":
         parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
         parser.add_argument('--star_removal_mode', type=str, choices=['additive', 'unscreen'], default='unscreen', help="Star Removal Mode")
         parser.add_argument('--show_extracted_stars', action='store_true', help="Output an additional image with only the extracted stars")
+        parser.add_argument('--chunk_size', type=int, default=512, help="Chunk size in pixels (default: 512)")
+        parser.add_argument('--overlap', type=int, default=None, help="Overlap size in pixels (default: 0.125 * chunk_size)")
         args = parser.parse_args()
 
         use_gpu = not args.disable_gpu
 
-        # 👇 ADD THIS
+        # Determine the overlap: if user didn't provide one, compute as 0.125 * chunk_size.
+        if args.overlap is None:
+            overlap = int(round(0.125 * args.chunk_size))
+        else:
+            overlap = args.overlap
+
         def cli_progress_callback(message):
             print(message, flush=True)
 
         process_images(
-            input_dir, output_dir,
+            input_dir, 
+            output_dir,
             starremoval_strength=1.0,
             use_gpu=use_gpu,
             star_removal_mode=args.star_removal_mode,
             show_extracted_stars=args.show_extracted_stars,
-            progress_callback=cli_progress_callback  # 👈 Use callback that prints with flush
+            chunk_size=args.chunk_size,
+            overlap=overlap,
+            progress_callback=cli_progress_callback
         )
         sys.exit(0)
 
@@ -936,4 +1008,5 @@ if __name__ == "__main__":
         window = StarRemovalUI()
         window.show()
         sys.exit(app.exec())
+
 
