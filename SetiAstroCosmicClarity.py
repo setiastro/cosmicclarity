@@ -13,12 +13,14 @@ import torch.nn as nn
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
-import tkinter as tk
-from tkinter import simpledialog, messagebox
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QLabel, QComboBox, QDoubleSpinBox,
+    QCheckBox, QPushButton, QHBoxLayout, QVBoxLayout, QSlider, QDialogButtonBox
+)
+from PyQt6.QtCore import Qt
 import argparse  # For command-line argument parsing
 import time  # For simulating progress updates
-from tkinter import ttk
-from tkinter import filedialog
+
 import onnxruntime as ort
 sys.stdout.reconfigure(encoding='utf-8')
 import sep
@@ -243,6 +245,111 @@ def load_models(exe_dir, use_gpu=True):
             "is_onnx": False,
         }
 
+
+class SharpeningConfigDialog(QDialog):
+    def __init__(self, defaults=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Cosmic Clarity Sharpening Tool V6.5")
+        self.setMinimumWidth(400)
+
+        # unpack defaults or fall back
+        (use_gpu, mode, ns_strength, stellar_amt,
+         separate_rgb, ns_amt, auto_detect_psf) = defaults or (
+            True, "Both", 3.0, 0.5, False, 0.5, True
+        )
+
+        layout = QVBoxLayout(self)
+
+        # GPU
+        layout.addWidget(QLabel("Use GPU Acceleration:"))
+        self.gpu_combo = QComboBox()
+        self.gpu_combo.addItems(["Yes", "No"])
+        self.gpu_combo.setCurrentText("Yes" if use_gpu else "No")
+        layout.addWidget(self.gpu_combo)
+
+        # Mode
+        layout.addWidget(QLabel("Sharpening Mode:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Both", "Stellar Only", "Non-Stellar Only"])
+        self.mode_combo.setCurrentText(mode)
+        self.mode_combo.currentTextChanged.connect(self._update_visibility)
+        layout.addWidget(self.mode_combo)
+
+        # Auto-detect PSF
+        layout.addWidget(QLabel("Auto Detect PSF:"))
+        self.psf_combo = QComboBox()
+        self.psf_combo.addItems(["Yes", "No"])
+        self.psf_combo.setCurrentText("Yes" if auto_detect_psf else "No")
+        layout.addWidget(self.psf_combo)
+
+        # Non-stellar PSF slider (1–8)
+        self.ns_strength_label = QLabel("Non-Stellar Sharpening PSF (1-8):")
+        layout.addWidget(self.ns_strength_label)
+        self.ns_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ns_strength_slider.setRange(1, 8)
+        self.ns_strength_slider.setValue(int(ns_strength))
+        layout.addWidget(self.ns_strength_slider)
+
+        # Stellar amount slider (0–1 → 0–100)
+        self.stellar_label = QLabel("Stellar Sharpening Amount (0-1):")
+        layout.addWidget(self.stellar_label)
+        self.stellar_slider = QSlider(Qt.Orientation.Horizontal)
+        self.stellar_slider.setRange(0, 100)
+        self.stellar_slider.setValue(int(stellar_amt * 100))
+        layout.addWidget(self.stellar_slider)
+
+        # Non-stellar amount slider (0–1 → 0–100)
+        self.ns_amt_label = QLabel("Non-Stellar Sharpening Amount (0-1):")
+        layout.addWidget(self.ns_amt_label)
+        self.ns_amt_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ns_amt_slider.setRange(0, 100)
+        self.ns_amt_slider.setValue(int(ns_amt * 100))
+        layout.addWidget(self.ns_amt_slider)
+
+        # Separate RGB
+        layout.addWidget(QLabel("Sharpen R, G, B Channels Separately:"))
+        self.separate_combo = QComboBox()
+        self.separate_combo.addItems(["No", "Yes"])
+        self.separate_combo.setCurrentText("Yes" if separate_rgb else "No")
+        layout.addWidget(self.separate_combo)
+
+        # OK / Cancel
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Kick off with correct visibility
+        self._update_visibility(self.mode_combo.currentText())
+
+    def _update_visibility(self, mode):
+        stellar = mode in ("Both", "Stellar Only")
+        nonstellar = mode in ("Both", "Non-Stellar Only")
+
+        # Stellar controls
+        self.stellar_label.setVisible(stellar)
+        self.stellar_slider.setVisible(stellar)
+
+        # Non-stellar controls
+        self.ns_strength_label.setVisible(nonstellar)
+        self.ns_strength_slider.setVisible(nonstellar)
+        self.ns_amt_label.setVisible(nonstellar)
+        self.ns_amt_slider.setVisible(nonstellar)
+
+    def get_values(self):
+        return (
+            self.gpu_combo.currentText() == "Yes",
+            self.mode_combo.currentText(),
+            float(self.ns_strength_slider.value()),
+            self.stellar_slider.value() / 100.0,
+            self.separate_combo.currentText() == "Yes",
+            self.ns_amt_slider.value() / 100.0,
+            self.psf_combo.currentText() == "Yes",
+        )
+
 def autocast_if_available(device):
     if device.type == 'cuda':
         major, minor = torch.cuda.get_device_capability()
@@ -380,115 +487,17 @@ def interpolate_nonstellar_sharpening(sharpened_1, sharpened_2, sharpened_4, sha
     else:
         return blend_images(sharpened_4, sharpened_8, (strength - 4) / 4)
 
-def get_user_input():
-    global use_gpu, sharpening_mode, nonstellar_strength, stellar_amount
-    global separate_rgb, nonstellar_amount, auto_detect_psf
-
-    # defaults
-    use_gpu             = True
-    sharpening_mode     = "Both"
-    nonstellar_strength = 3.0
-    stellar_amount      = 0.5
-    nonstellar_amount   = 0.5
-    separate_rgb        = False
-    auto_detect_psf     = True
-
-    def on_submit():
-        global use_gpu, sharpening_mode, nonstellar_strength
-        global stellar_amount, separate_rgb, nonstellar_amount, auto_detect_psf
-
-        use_gpu             = (gpu_var.get() == "Yes")
-        sharpening_mode     = mode_var.get()
-        nonstellar_strength = nonstellar_strength_slider.get()
-        stellar_amount      = None if sharpening_mode == "Non-Stellar Only" else stellar_amount_slider.get()
-        nonstellar_amount   = None if sharpening_mode == "Stellar Only"     else nonstellar_amount_slider.get()
-        separate_rgb        = (separate_rgb_var.get() == "Yes")
-        auto_detect_psf     = (psf_var.get() == "Yes")
-
-        root.destroy()
-
-    def update_sliders(*_):
-        m = mode_var.get()
-        if m == "Both":
-            nonstellar_strength_label.pack()
-            nonstellar_strength_slider.pack()
-            stellar_amount_label.pack()
-            stellar_amount_slider.pack()
-            nonstellar_amount_label.pack()
-            nonstellar_amount_slider.pack()
-        elif m == "Stellar Only":
-            nonstellar_strength_label.pack_forget()
-            nonstellar_strength_slider.pack_forget()
-            stellar_amount_label.pack()
-            stellar_amount_slider.pack()
-            nonstellar_amount_label.pack_forget()
-            nonstellar_amount_slider.pack_forget()
-        else:  # “Non-Stellar Only”
-            nonstellar_strength_label.pack()
-            nonstellar_strength_slider.pack()
-            stellar_amount_label.pack_forget()
-            stellar_amount_slider.pack_forget()
-            nonstellar_amount_label.pack()
-            nonstellar_amount_slider.pack()
-
-        submit_button.pack_forget()
-        submit_button.pack(pady=20)
-
-    root = tk.Tk()
-    root.title("Cosmic Clarity Sharpening Tool")
-    root.geometry("400x620")
-
-    # GPU Acceleration
-    ttk.Label(root, text="Use GPU Acceleration:").pack(pady=5)
-    gpu_var = tk.StringVar(value="Yes")
-    ttk.OptionMenu(root, gpu_var, "Yes", "Yes", "No").pack()
-
-    # Sharpening Mode
-    ttk.Label(root, text="Sharpening Mode:").pack(pady=5)
-    mode_var = tk.StringVar(value="Both")
-    ttk.OptionMenu(root, mode_var, "Both", "Both", "Stellar Only", "Non-Stellar Only").pack()
-    mode_var.trace_add('write', update_sliders)
-
-    # Auto‐Detect PSF
-    ttk.Label(root, text="Auto Detect PSF:").pack(pady=5)
-    psf_var = tk.StringVar(value="Yes")
-    ttk.OptionMenu(root, psf_var, "Yes", "Yes", "No").pack()
-
-    # Non‐Stellar PSF slider
-    nonstellar_strength_label = ttk.Label(root, text="Non-Stellar PSF (1–8):")
-    nonstellar_strength_slider = tk.Scale(root, from_=1, to=8, resolution=0.1, orient="horizontal")
-    nonstellar_strength_slider.set(3)
-
-    # Stellar amount slider
-    stellar_amount_label = ttk.Label(root, text="Stellar Amount (0–1):")
-    stellar_amount_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
-    stellar_amount_slider.set(0.5)
-
-    # Non‐Stellar amount slider
-    nonstellar_amount_label = ttk.Label(root, text="Non-Stellar Amount (0–1):")
-    nonstellar_amount_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
-    nonstellar_amount_slider.set(0.5)
-
-    # Separate RGB
-    ttk.Label(root, text="Sharpen R, G, B Separately:").pack(pady=5)
-    separate_rgb_var = tk.StringVar(value="No")
-    ttk.OptionMenu(root, separate_rgb_var, "No", "Yes", "No").pack()
-
-    # Submit
-    submit_button = ttk.Button(root, text="Submit", command=on_submit)
-    update_sliders()  # initial layout
-    root.mainloop()
-
-    return (
-        use_gpu,
-        sharpening_mode,
-        nonstellar_strength,
-        stellar_amount,
-        separate_rgb,
-        nonstellar_amount,
-        auto_detect_psf
-    )
-
+def get_user_input(defaults=None):
+    """
+    Pops up the PyQt6 dialog and returns the config dict,
+    or exits if the user cancels.
+    """
+    app = QApplication.instance() or QApplication(sys.argv)
+    dlg = SharpeningConfigDialog(defaults=defaults)
+    if dlg.exec() == QDialog.DialogCode.Accepted.value:
+        return dlg.get_values()
+    else:
+        sys.exit(0)
 
 
 
