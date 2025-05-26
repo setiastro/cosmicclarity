@@ -281,6 +281,8 @@ class SharpeningConfigDialog(QDialog):
         self.psf_combo.addItems(["Yes", "No"])
         self.psf_combo.setCurrentText("Yes" if auto_detect_psf else "No")
         layout.addWidget(self.psf_combo)
+        self.psf_combo.currentTextChanged.connect(self._update_visibility)
+
 
         # Non-stellar PSF slider (1–8)
         self.ns_strength_label = QLabel("Non-Stellar Sharpening PSF (1-8):")
@@ -325,19 +327,23 @@ class SharpeningConfigDialog(QDialog):
         # Kick off with correct visibility
         self._update_visibility(self.mode_combo.currentText())
 
-    def _update_visibility(self, mode):
-        stellar = mode in ("Both", "Stellar Only")
-        nonstellar = mode in ("Both", "Non-Stellar Only")
+    def _update_visibility(self, *_):
+        mode = self.mode_combo.currentText()
+        auto_psf = (self.psf_combo.currentText() == "Yes")
 
         # Stellar controls
+        stellar = mode in ("Both", "Stellar Only")
         self.stellar_label.setVisible(stellar)
         self.stellar_slider.setVisible(stellar)
 
-        # Non-stellar controls
+        # Non-stellar controls only if needed AND not auto-psf
+        nonstellar = mode in ("Both", "Non-Stellar Only") and not auto_psf
         self.ns_strength_label.setVisible(nonstellar)
         self.ns_strength_slider.setVisible(nonstellar)
-        self.ns_amt_label.setVisible(nonstellar)
-        self.ns_amt_slider.setVisible(nonstellar)
+        # Amount slider still follows mode (amount always needed when non-stellar)
+        show_amt = mode in ("Both", "Non-Stellar Only")
+        self.ns_amt_label.setVisible(show_amt)
+        self.ns_amt_slider.setVisible(show_amt)
 
     def get_values(self):
         return (
