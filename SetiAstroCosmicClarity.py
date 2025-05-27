@@ -284,28 +284,31 @@ class SharpeningConfigDialog(QDialog):
         self.psf_combo.currentTextChanged.connect(self._update_visibility)
 
 
-        # Non-stellar PSF slider (1–8)
-        self.ns_strength_label = QLabel("Non-Stellar Sharpening PSF (1-8):")
+        # Non‐stellar PSF slider (1–8)
+        self.ns_strength_label = QLabel(f"Non-Stellar PSF (1–8): {ns_strength:.1f}")
         layout.addWidget(self.ns_strength_label)
         self.ns_strength_slider = QSlider(Qt.Orientation.Horizontal)
-        self.ns_strength_slider.setRange(1, 8)
-        self.ns_strength_slider.setValue(int(ns_strength))
+        self.ns_strength_slider.setRange(10, 80)               # store tenths (1.0–8.0)
+        self.ns_strength_slider.setValue(int(ns_strength*10))
+        self.ns_strength_slider.valueChanged.connect(self._on_ns_strength_changed)
         layout.addWidget(self.ns_strength_slider)
 
-        # Stellar amount slider (0–1 → 0–100)
-        self.stellar_label = QLabel("Stellar Sharpening Amount (0-1):")
+        # Stellar amount slider (0–1)
+        self.stellar_label = QLabel(f"Stellar Amount (0–1): {stellar_amt:.2f}")
         layout.addWidget(self.stellar_label)
         self.stellar_slider = QSlider(Qt.Orientation.Horizontal)
         self.stellar_slider.setRange(0, 100)
-        self.stellar_slider.setValue(int(stellar_amt * 100))
+        self.stellar_slider.setValue(int(stellar_amt*100))
+        self.stellar_slider.valueChanged.connect(self._on_stellar_changed)
         layout.addWidget(self.stellar_slider)
 
-        # Non-stellar amount slider (0–1 → 0–100)
-        self.ns_amt_label = QLabel("Non-Stellar Sharpening Amount (0-1):")
+        # Non‐stellar amount slider (0–1)
+        self.ns_amt_label = QLabel(f"Non-Stellar Amount (0–1): {ns_amt:.2f}")
         layout.addWidget(self.ns_amt_label)
         self.ns_amt_slider = QSlider(Qt.Orientation.Horizontal)
         self.ns_amt_slider.setRange(0, 100)
-        self.ns_amt_slider.setValue(int(ns_amt * 100))
+        self.ns_amt_slider.setValue(int(ns_amt*100))
+        self.ns_amt_slider.valueChanged.connect(self._on_ns_amt_changed)
         layout.addWidget(self.ns_amt_slider)
 
         # Separate RGB
@@ -326,6 +329,18 @@ class SharpeningConfigDialog(QDialog):
 
         # Kick off with correct visibility
         self._update_visibility(self.mode_combo.currentText())
+
+    def _on_ns_strength_changed(self, v: int):
+        val = v / 10.0
+        self.ns_strength_label.setText(f"Non-Stellar PSF (1–8): {val:.1f}")
+
+    def _on_stellar_changed(self, v: int):
+        val = v / 100.0
+        self.stellar_label.setText(f"Stellar Amount (0–1): {val:.2f}")
+
+    def _on_ns_amt_changed(self, v: int):
+        val = v / 100.0
+        self.ns_amt_label.setText(f"Non-Stellar Amount (0–1): {val:.2f}")
 
     def _update_visibility(self, *_):
         mode = self.mode_combo.currentText()
