@@ -1,10 +1,10 @@
-# PyQt5 Imports
-from PyQt5.QtWidgets import (
+# PyQt6 Imports
+from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QComboBox, QPushButton, QCheckBox, QFileDialog, QLineEdit, QTextEdit, QStyle, QProgressBar, QSlider
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QIcon
 
 # Standard Library Imports
 import os
@@ -24,6 +24,23 @@ import numpy as np
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
+
+try:
+    import av, logging
+    class _AVLogShim:
+        DEBUG   = logging.DEBUG
+        INFO    = logging.INFO
+        WARNING = logging.WARNING
+        ERROR   = logging.ERROR
+
+        @staticmethod
+        def set_level(level):
+            # no‐op
+            return
+
+    av.logging = _AVLogShim
+except ImportError:
+    pass
 from torchvision import models, transforms
 from torchvision.models import ResNet18_Weights
 import lz4.block
@@ -32,6 +49,7 @@ from torchvision.models import MobileNet_V2_Weights
 import torch.sparse
 import torch._C
 import onnxruntime as ort
+sys.stdout.reconfigure(encoding='utf-8')
 
 import rawpy
 
@@ -688,7 +706,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.3 AI3")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.4 AI3")
 
         self.setGeometry(100, 100, 400, 300)
 
@@ -774,12 +792,13 @@ class SatelliteToolDialog(QDialog):
         sensitivity_layout = QHBoxLayout()
         sensitivity_label = QLabel("Clipping Sensitivity (Smaller Value more aggressive clipping):")
         self.sensitivity_value_label = QLabel(f"{self.sensitivity:.2f}")
-        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
+
         self.sensitivity_slider.setMinimum(1)   # Represents 0.01
         self.sensitivity_slider.setMaximum(50)  # Represents 0.5
         self.sensitivity_slider.setValue(int(self.sensitivity * 100))  # e.g., 0.1 * 100 = 10
         self.sensitivity_slider.setTickInterval(1)
-        self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
+        self.sensitivity_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.sensitivity_slider.valueChanged.connect(self.update_sensitivity)
 
         sensitivity_layout.addWidget(sensitivity_label)
@@ -803,12 +822,12 @@ class SatelliteToolDialog(QDialog):
 
         # Start Live Monitor button with green light icon
         self.live_monitor_button = QPushButton("Start Live Monitor")
-        self.live_monitor_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.live_monitor_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
         self.live_monitor_button.clicked.connect(self.start_live_monitor)
 
         # Stop Live Monitor button with stop icon
         self.stop_monitor_button = QPushButton("Stop Live Monitor")
-        self.stop_monitor_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogCancelButton))
+        self.stop_monitor_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton))
         self.stop_monitor_button.clicked.connect(self.stop_live_monitor)
         self.stop_monitor_button.setEnabled(False)
 
@@ -824,7 +843,8 @@ class SatelliteToolDialog(QDialog):
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
         """)
-        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter
+)
         footer_label.setOpenExternalLinks(True)
         footer_label.setStyleSheet("font-size: 10px;")
         layout.addWidget(footer_label)
@@ -840,10 +860,10 @@ class SatelliteToolDialog(QDialog):
 
     def update_skip_save(self, state):
         global GLOBAL_SKIP_SAVE
-        GLOBAL_SKIP_SAVE = state == Qt.Checked
+        GLOBAL_SKIP_SAVE = state == Qt.CheckState.Checked
 
     def update_clip_trail(self, state):
-        set_clip_trail(state == Qt.Checked)
+        set_clip_trail(state == Qt.CheckState.Checked)
 
     def update_progress_bar(self, progress):
         """Update the progress bar value."""
@@ -957,7 +977,7 @@ class SatelliteToolDialog(QDialog):
 def get_user_input():
     app = QApplication([])
     dialog = SatelliteToolDialog()
-    if dialog.exec_() == QDialog.Accepted:
+    if dialog.exec() == QDialog.Accepted:
         # Ensure input and output folders are valid
         if not dialog.input_dir or not dialog.output_dir:
             raise ValueError("Input and Output directories must be specified.")
@@ -1556,47 +1576,60 @@ def apply_clip_trail_logic(processed_chunk, original_chunk, sensitivity=0.1):
 
 def save_processed_image(image, output_path, file_extension, bit_depth, original_header=None, is_mono=False, file_meta=None, image_meta=None):
     """Save the processed image to the appropriate format."""
+    """Save the processed image to the appropriate format."""
     if file_extension in ['.fits', '.fit']:
-        # Save as FITS file with header information if the original was FITS
+        # ——— 1) Build a dummy HDU purely to auto-fix the header ———
         if original_header is not None:
-            if is_mono:  # Grayscale FITS
-                if bit_depth == "16-bit":
-                    satellited_image_fits = (image[:, :, 0] * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    bzero = original_header.get('BZERO', 0)
-                    bscale = original_header.get('BSCALE', 1)
-                    satellited_image_fits = (image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
-                else:  # 32-bit float
-                    satellited_image_fits = image[:, :, 0].astype(np.float32)
+            # Copy your original header into a PrimaryHDU
+            fixer = fits.PrimaryHDU(header=original_header.copy())
+            # Ask Astropy to fix *all* non-standard cards in place
+            fixer.verify('fix')
+            # Now grab back the cleaned header
+            hdr = fixer.header
+        else:
+            hdr = None
+        # ——— 2) Build the FITS data array ———
+        if is_mono:
+            # single-channel
+            if bit_depth == "16-bit":
+                data = (image[:, :, 0] * 65535).astype(np.uint16)
+            elif bit_depth == "32-bit unsigned":
+                bzero = hdr.get('BZERO', 0)
+                bscale = hdr.get('BSCALE', 1)
+                data = (image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+            else:  # 32-bit float
+                data = image[:, :, 0].astype(np.float32)
+        else:
+            # RGB → (3, Y, X)
+            arr = np.transpose(image, (2, 0, 1))
+            if bit_depth == "16-bit":
+                data = (arr * 65535).astype(np.uint16)
+            elif bit_depth == "32-bit unsigned":
+                data = arr.astype(np.float32)
+                if hdr is not None:
+                    hdr['BITPIX'] = -32
+            else:
+                data = arr.astype(np.float32)
 
-                # Update header for a 2D (grayscale) image
-                original_header['NAXIS'] = 2
-                original_header['NAXIS1'] = image.shape[1]  # Width
-                original_header['NAXIS2'] = image.shape[0]  # Height
-                if 'NAXIS3' in original_header:
-                    del original_header['NAXIS3']  # Remove if present
+        # ——— 3) Fix up the NAXIS keywords if we have a header ———
+        if hdr is not None:
+            if is_mono:
+                hdr['NAXIS']  = 2
+                hdr['NAXIS1'] = data.shape[1]
+                hdr['NAXIS2'] = data.shape[0]
+            else:
+                hdr['NAXIS']  = 3
+                hdr['NAXIS1'] = data.shape[2]
+                hdr['NAXIS2'] = data.shape[1]
+                hdr['NAXIS3'] = data.shape[0]
 
-                hdu = fits.PrimaryHDU(satellited_image_fits, header=original_header)
-            else:  # RGB FITS
-                satellited_image_transposed = np.transpose(image, (2, 0, 1))  # Channels, Height, Width
-                if bit_depth == "16-bit":
-                    satellited_image_fits = (satellited_image_transposed * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    satellited_image_fits = satellited_image_transposed.astype(np.float32)
-                    original_header['BITPIX'] = -32
-                else:
-                    satellited_image_fits = satellited_image_transposed.astype(np.float32)
+        # ——— 4) Write it out, letting Astropy auto-fix any tiny remaining issues ———
+        hdu  = fits.PrimaryHDU(data, header=hdr)
+        hdul = fits.HDUList([hdu])
+        hdul.writeto(output_path, overwrite=True, output_verify='fix')
+        print(f"Saved FITS to: {output_path}")
+        return
 
-                # Update header for a 3D (RGB) image
-                original_header['NAXIS'] = 3
-                original_header['NAXIS1'] = satellited_image_transposed.shape[2]  # Width
-                original_header['NAXIS2'] = satellited_image_transposed.shape[1]  # Height
-                original_header['NAXIS3'] = satellited_image_transposed.shape[0]  # Channels
-
-                hdu = fits.PrimaryHDU(satellited_image_fits, header=original_header)
-
-            # Write the FITS file
-            hdu.writeto(output_path, overwrite=True)
     elif file_extension in ['.tif', '.tiff']:
         # Save as TIFF based on the original bit depth
         if bit_depth == "16-bit":
@@ -1939,7 +1972,7 @@ if __name__ == "__main__":
                 batch_processor.processing_complete.connect(progress_dialog.close)
                 batch_processor.start()
 
-                app.exec_()  # Execute the Qt event loop
+                app.exec()  # Execute the Qt event loop
 
             elif args.monitor:
                 print("Starting live folder monitoring...")
@@ -1977,7 +2010,7 @@ if __name__ == "__main__":
 
                 folder_monitor.start()
 
-                app.exec_()  # Execute the Qt event loop
+                app.exec()  # Execute the Qt event loop
 
             else:
                 print("Error: Please specify --batch or --monitor.")
@@ -1986,4 +2019,4 @@ if __name__ == "__main__":
     else:
         print("No arguments provided. Launching GUI...")
         dialog = SatelliteToolDialog()
-        dialog.exec_()
+        dialog.exec()
