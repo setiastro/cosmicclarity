@@ -13,12 +13,10 @@ import torch.nn as nn
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
-import tkinter as tk
-from tkinter import simpledialog, messagebox
+
 import argparse  # For command-line argument parsing
 import time  # For simulating progress updates
-from tkinter import ttk
-from tkinter import filedialog
+
 import onnxruntime as ort
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -33,139 +31,204 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont
 
+class RefinementCNN(nn.Module):
+    def __init__(self, channels: int = 96):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, channels, 3, padding=1, dilation=1), nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=2, dilation=2), nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=4, dilation=4), nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=8, dilation=8), nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=8, dilation=8), nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=4, dilation=4), nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, padding=2, dilation=2), nn.ReLU(),
+            nn.Conv2d(channels, 3,      3, padding=1, dilation=1), nn.Sigmoid()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.relu  = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
     def forward(self, x):
-        residual = x
         out = self.conv1(x)
         out = self.relu(out)
         out = self.conv2(out)
-        out += residual
-        out = self.relu(out)
-        return out
+        return self.relu(out + x)
 
-class SuperResolutionCNN(nn.Module):
+class DarkStarCNN(nn.Module):
     def __init__(self):
-        super(SuperResolutionCNN, self).__init__()
-        # ENCODER
+        super().__init__()
+
+        # ── ENCODER ───────────────────────────────────────
+        # Level 1: 3 → 16, *two extra* ResidualBlocks at 16
         self.encoder1 = nn.Sequential(
             nn.Conv2d(3, 16, 3, padding=1),
-            nn.ReLU(),
-            ResidualBlock(16),
+            nn.ReLU(inplace=True),
+            ResidualBlock(16),  # original
+            ResidualBlock(16),  # extra block to sharpen edges
+            ResidualBlock(16),  # another extra, if you want
         )
+        # Level 2: 16 → 32, *two* ResidualBlocks at 32
         self.encoder2 = nn.Sequential(
             nn.Conv2d(16, 32, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
+            ResidualBlock(32),
             ResidualBlock(32),
         )
+        # Level 3: 32 → 64, *one extra* ResidualBlock at 64
         self.encoder3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),
-            nn.ReLU(),
-            ResidualBlock(64),
+            nn.Conv2d(32, 64, 3, padding=2, dilation=2),
+            nn.ReLU(inplace=True),
+            ResidualBlock(64),  # original
+            ResidualBlock(64),  # extra for star‐shape context
         )
+        # Level 4: 64 → 128 (keep just one block, since capacity is enough here)
         self.encoder4 = nn.Sequential(
             nn.Conv2d(64, 128, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             ResidualBlock(128),
         )
+        # Level 5: 128 → 256 (single block; too deep to over-invest here)
         self.encoder5 = nn.Sequential(
             nn.Conv2d(128, 256, 3, padding=2, dilation=2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             ResidualBlock(256),
         )
-        # DECODER (with skip connections)
+
+        # ── DECODER ───────────────────────────────────────
+        # Decoder 5: (256 + 128) → 128, one ResidualBlock
         self.decoder5 = nn.Sequential(
             nn.Conv2d(256 + 128, 128, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             ResidualBlock(128),
         )
+        # Decoder 4: (128 + 64) → 64, one ResidualBlock
         self.decoder4 = nn.Sequential(
             nn.Conv2d(128 + 64, 64, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             ResidualBlock(64),
         )
+        # Decoder 3: → 32, *one extra* ResidualBlock at 32 (to preserve sharp edge reconstruction)
         self.decoder3 = nn.Sequential(
-            nn.Conv2d(64 + 32, 32, 3, padding=1),
-            nn.ReLU(),
+            nn.Conv2d(64, 32, 3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualBlock(32),
             ResidualBlock(32),
         )
+        # Decoder 2: → 16, one ResidualBlock
         self.decoder2 = nn.Sequential(
-            nn.Conv2d(32 + 16, 16, 3, padding=1),
-            nn.ReLU(),
+            nn.Conv2d(32, 16, 3, padding=1),
+            nn.ReLU(inplace=True),
             ResidualBlock(16),
         )
+        # Decoder 1 / Output: 16 → 3
         self.decoder1 = nn.Sequential(
             nn.Conv2d(16, 3, 3, padding=1),
             nn.Sigmoid(),
         )
+
     def forward(self, x):
-        e1 = self.encoder1(x)
-        e2 = self.encoder2(e1)
-        e3 = self.encoder3(e2)
-        e4 = self.encoder4(e3)
-        e5 = self.encoder5(e4)
-        d5 = self.decoder5(torch.cat([e5, e4], dim=1))
-        d4 = self.decoder4(torch.cat([d5, e3], dim=1))
-        d3 = self.decoder3(torch.cat([d4, e2], dim=1))
-        d2 = self.decoder2(torch.cat([d3, e1], dim=1))
-        d1 = self.decoder1(d2)
-        return d1
+        # ENCODING
+        e1 = self.encoder1(x)  # [B,16,H,W], high‐frequency focused
+        e2 = self.encoder2(e1) # [B,32,H,W], still on edges
+        e3 = self.encoder3(e2) # [B,64,H,W], has some star‐shape context
+        e4 = self.encoder4(e3) # [B,128,H,W], more global
+        e5 = self.encoder5(e4) # [B,256,H,W], very global
+
+        # DECODING (keeps only two top‐level skips)
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1)) # → [B,128,H,W]
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # → [B,64,H,W]
+        d3 = self.decoder3(d4)                           # → [B,32,H,W]
+        d2 = self.decoder2(d3)                           # → [B,16,H,W]
+        return self.decoder1(d2)                         # → [B, 3,H,W]
 
 # Cascaded model: two U-Nets in series.
 class CascadedStarRemovalNetCombined(nn.Module):
-    def __init__(self, stage1_path, stage2_path):
-        super(CascadedStarRemovalNetCombined, self).__init__()
-        # Load Stage 1 weights and remove any "stage1." prefix.
-        self.stage1 = SuperResolutionCNN()
-        map_fn = lambda storage, loc: storage.cuda() if torch.cuda.is_available() else storage
-        state_dict1 = torch.load(stage1_path, map_location=map_fn)
-        new_state_dict1 = {}
-        for key, value in state_dict1.items():
-            if key.startswith("stage1."):
-                new_key = key[len("stage1."):]
-            else:
-                new_key = key
-            new_state_dict1[new_key] = value
-        self.stage1.load_state_dict(new_state_dict1)
-        
-        # ---------------------------------------------------------------------------
-        # Stage 2 code commented out for now.
-        """
-        # Load Stage 2 weights (if you need it) and remove prefixes.
-        self.stage2 = SuperResolutionCNN()
-        state_dict2 = torch.load(stage2_path, map_location=map_fn)
-        new_state_dict2 = {}
-        for key, value in state_dict2.items():
-            if key.startswith("stage2."):
-                new_key = key[len("stage2."):]
-            elif key.startswith("stage1."):
-                new_key = key[len("stage1."):]
-            else:
-                new_key = key
-            new_state_dict2[new_key] = value
-        self.stage2.load_state_dict(new_state_dict2)
-        """
-        # ---------------------------------------------------------------------------
-    
-    def forward(self, x):
-        coarse = self.stage1(x)
-        # The Stage 2 refinement is currently disabled.
-        # refined = self.stage2(coarse)
-        return coarse
+    def __init__(self, stage1_path, stage2_path=None):
+        super().__init__()
 
+        # --- Stage 1 (coarse) ---
+        self.stage1 = DarkStarCNN()
+        ckpt1 = torch.load(stage1_path, map_location='cpu')
+        # strip any "stage1." prefix if present
+        sd1 = {k[len("stage1."):]: v for k, v in ckpt1.items() if k.startswith("stage1.")}
+        self.stage1.load_state_dict(sd1)
+
+        # --- Stage 2 (refinement) ---
+        self.stage2 = RefinementCNN()
+        if stage2_path and os.path.exists(stage2_path):
+            ckpt2 = torch.load(stage2_path, map_location='cpu')
+            # if it’s a dict with extra info, pull out just the model_state
+            if isinstance(ckpt2, dict) and 'model_state' in ckpt2:
+                sd2 = ckpt2['model_state']
+            else:
+                sd2 = ckpt2
+            self.stage2.load_state_dict(sd2)
+        else:
+            print("Warning: no stage2 checkpoint, starting refinement from scratch")
+
+        # --- Freeze only stage1 ---
+        for p in self.stage1.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        with torch.no_grad():
+            coarse = self.stage1(x)
+            #coarse = self.stage2(x)
+        #return self.stage2(coarse)
+        return coarse
 
 # Get the directory of the executable or the script location.
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
 def load_model(exe_dir, use_gpu=True):
     print(torch.__version__)
-    
+
+    is_windows = platform.system() == "Windows"
+    stage1_pth_path = os.path.join(exe_dir, 'darkstar_v2.0.pth')
+    stage1_onnx_path = os.path.splitext(stage1_pth_path)[0] + '.onnx'
+    stage2_pth = None
+
+    # Priority: Windows + CUDA → ONNX → CPU
+    if is_windows:
+        if use_gpu and torch.cuda.is_available():
+            print("Windows + CUDA detected. Using PyTorch with GPU.")
+            device = torch.device("cuda")
+            model = CascadedStarRemovalNetCombined(stage1_pth_path, stage2_pth)
+            model.eval()
+            model.to(device)
+            return {
+                "starremoval_model": model,
+                "device": device,
+                "is_onnx": False
+            }
+        elif os.path.exists(stage1_onnx_path):
+            print("Windows detected. Using ONNX Runtime.")
+            providers = ['DmlExecutionProvider'] if use_gpu else ['CPUExecutionProvider']
+            session = ort.InferenceSession(stage1_onnx_path, providers=providers)
+            return {
+                "starremoval_model": session,
+                "device": 'onnx',
+                "is_onnx": True
+            }
+        else:
+            print("Windows fallback. Using PyTorch on CPU.")
+            device = torch.device("cpu")
+            model = CascadedStarRemovalNetCombined(stage1_pth_path, stage2_pth)
+            model.eval()
+            model.to(device)
+            return {
+                "starremoval_model": model,
+                "device": device,
+                "is_onnx": False
+            }
+
+    # Non-Windows: default PyTorch behavior
     if use_gpu:
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -175,24 +238,17 @@ def load_model(exe_dir, use_gpu=True):
             device = torch.device("cpu")
     else:
         device = torch.device("cpu")
-    
-    print(f"Using device: {device}")
-    
-    # Specify path for Stage 1 weights.
-    stage1_path = os.path.join(exe_dir, 'darkstar_v1.pth')
-    # Stage 2 weights path is commented out until needed.
-    # stage2_path = os.path.join(exe_dir, 'darkstar_v2.pth')
-    
-    # Initialize the cascaded model.
-    # Since Stage 2 is disabled, a dummy value (None) is passed for stage2_path.
-    starremoval_model = CascadedStarRemovalNetCombined(stage1_path, None)
-    starremoval_model.eval()
-    starremoval_model.to(device)
-    
+
+    print(f"Non-Windows system using device: {device}")
+    model = CascadedStarRemovalNetCombined(stage1_pth_path, None)
+    model.eval()
+    model.to(device)
     return {
-        "starremoval_model": starremoval_model,
-        "device": device
+        "starremoval_model": model,
+        "device": device,
+        "is_onnx": False
     }
+
 
 
 # Function to split an image into chunks with overlap
@@ -304,7 +360,7 @@ class ProcessingThread(QThread):
 class StarRemovalUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity - Dark Star")
+        self.setWindowTitle("Cosmic Clarity - Dark Star V2.0")
         self.setMinimumSize(400, 300)
         self.use_gpu = True
         self.star_removal_mode = "unscreen"
@@ -344,7 +400,7 @@ class StarRemovalUI(QMainWindow):
         layout.addWidget(self.chunk_size_spinbox)
 
         # Add a label to display the computed overlap.
-        overlap = int(round(0.125 * self.chunk_size_spinbox.value()))
+        overlap = int(round(0.2 * self.chunk_size_spinbox.value()))
         self.overlap_label = QLabel(f"Overlap: {overlap} pixels")
         layout.addWidget(self.overlap_label)
 
@@ -512,6 +568,7 @@ def remove_border(image, border_size=5):
 # Main starremoval function for an image
 def starremoval_image(image_path, starremoval_strength, device, model,
                       border_size=16, chunk_size=512, overlap=None, progress_callback=None):
+    use_onnx = isinstance(model, ort.InferenceSession)
     try:
         file_extension = os.path.splitext(image_path)[1].lower()
         if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
@@ -552,79 +609,69 @@ def starremoval_image(image_path, starremoval_strength, device, model,
                     is_mono = False
 
             elif file_extension in ['.fits', '.fit']:
-                # Load the FITS image
-                with fits.open(image_path) as hdul:
-                    image_data = hdul[0].data
-                    original_header = hdul[0].header  # Capture the FITS header
-                    image = image_data
-                    original_image = image.copy()
+                # 1) Read the FITS
+                with fits.open(image_path, memmap=False) as hdul:
+                    data = hdul[0].data
+                    original_header = hdul[0].header.copy()
+                # 2) Make sure byteorder is native
+                if data.dtype.byteorder not in ('=', '|'):
+                    data = data.astype(data.dtype.newbyteorder('='))
 
-                    # Ensure the image data uses the native byte order
-                    if image_data.dtype.byteorder not in ('=', '|'):  # Check if byte order is non-native
-                        image_data = image_data.astype(image_data.dtype.newbyteorder('='))  # Convert to native byte order
+                # 3) Figure out bit depth for later
+                if data.dtype == np.uint16:
+                    bit_depth = "16-bit"
+                elif data.dtype == np.uint32:
+                    bit_depth = "32-bit unsigned"
+                elif data.dtype == np.float32:
+                    bit_depth = "32-bit float"
+                else:
+                    raise ValueError(f"Unsupported FITS dtype: {data.dtype}")
 
+                # 4) Convert to float32 [0..1], handling BSCALE/BZERO on unsigned and floats
+                def apply_bscale(arr):
+                    bzero = original_header.get('BZERO', 0)
+                    bscale = original_header.get('BSCALE', 1)
+                    arr = arr.astype(np.float32) * bscale + bzero
+                    # normalize full dynamic range
+                    mn, mx = arr.min(), arr.max()
+                    return (arr - mn) / (mx - mn) if mx>mn else arr
 
-                    # Determine the bit depth based on the data type in the FITS file
-                    if image_data.dtype == np.uint16:
-                        bit_depth = "16-bit"
-                        print("Identified 16-bit FITS image.")
-                    elif image_data.dtype == np.float32:
-                        bit_depth = "32-bit floating point"
-                        print("Identified 32-bit floating point FITS image.")
-                    elif image_data.dtype == np.uint32:
-                        bit_depth = "32-bit unsigned"
-                        print("Identified 32-bit unsigned FITS image.")
+                if data.ndim == 2:
+                    # grayscale → stack into 3 channels
+                    mono = data.astype(np.float32)
+                    if bit_depth == "16-bit":
+                        mono /= 65535.0
+                    elif bit_depth == "32-bit unsigned":
+                        mono = apply_bscale(mono)
+                    # (32-bit float stays as-is)
+                    image = np.stack([mono]*3, axis=-1)
+                    is_mono = True
 
-                    # Handle 3D FITS data (e.g., RGB or multi-layered data)
-                    if image_data.ndim == 3 and image_data.shape[0] == 3:
-                        image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
-                        
-                        if bit_depth == "16-bit":
-                            image = image.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
-                        elif bit_depth == "32-bit unsigned":
-                            # Apply BSCALE and BZERO if present
-                            bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
-                            bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
+                elif data.ndim == 3 and data.shape[-1] == 3:
+                    # already H×W×3
+                    img = data.astype(np.float32)
+                    if bit_depth == "16-bit":
+                        img /= 65535.0
+                    elif bit_depth == "32-bit unsigned":
+                        img = apply_bscale(img)
+                    image = img
+                    is_mono = False
 
-                            # Convert to float and apply the scaling and offset
-                            image = image.astype(np.float32) * bscale + bzero
+                elif data.ndim == 3 and data.shape[0] == 3:
+                    # 3×H×W → transpose to H×W×3
+                    img = np.transpose(data, (1,2,0)).astype(np.float32)
+                    if bit_depth == "16-bit":
+                        img /= 65535.0
+                    elif bit_depth == "32-bit unsigned":
+                        img = apply_bscale(img)
+                    image = img
+                    is_mono = False
 
-                            # Normalize based on the actual data range
-                            image_min = image.min()  # Get the min value after applying BZERO
-                            image_max = image.max()  # Get the max value after applying BZERO
+                else:
+                    raise ValueError(f"Unsupported FITS shape: {data.shape}")
 
-                            # Normalize the image data to the range [0, 1]
-                            image = (image - image_min) / (image_max - image_min)
-                            print(f"Image range after applying BZERO and BSCALE (3D case): min={image_min}, max={image_max}")
-
-                        is_mono = False  # RGB data
-
-                    # Handle 2D FITS data (grayscale)
-                    elif image_data.ndim == 2:
-                        if bit_depth == "16-bit":
-                            image = image_data.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
-                        elif bit_depth == "32-bit unsigned":
-                            # Apply BSCALE and BZERO if present
-                            bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
-                            bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
-
-                            # Convert to float and apply the scaling and offset
-                            image = image_data.astype(np.float32) * bscale + bzero
-
-                            # Normalize based on the actual data range
-                            image_min = image.min()  # Get the min value after applying BZERO
-                            image_max = image.max()  # Get the max value after applying BZERO
-
-                            # Normalize the image data to the range [0, 1]
-                            image = (image - image_min) / (image_max - image_min)
-                            print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
-
-                        elif bit_depth == "32-bit floating point":
-                            image = image_data  # No normalization needed for 32-bit float
-                        is_mono = True
-                        image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel for consistency
-                    else:
-                        raise ValueError("Unsupported FITS format!")
+                original_image = image.copy()
+                print(f"Loaded FITS image: {bit_depth}, shape {image.shape}, mono={is_mono}")
 
             # Check if file extension is '.xisf'
             elif file_extension == '.xisf':
@@ -677,40 +724,67 @@ def starremoval_image(image_path, starremoval_strength, device, model,
             stretched_image = image_with_border
             original_min = None
 
+        # if PYTORCH, we'll send tensors to `device`; if ONNX, we ignore device
+        session = model if use_onnx else None
+
         def process_chunks(chunks, processed_image_shape):
             starless_chunks = []
+            
             for idx, (chunk, i, j) in enumerate(chunks):
                 # Compute patch-specific normalization parameters.
-                patch_min = chunk.min()
-                patch_max = chunk.max()
-                # Add a small constant to the denominator to avoid division by zero.
+                patch_min, patch_max = chunk.min(), chunk.max()
                 epsilon = 1e-8
-                # Normalize the chunk using its own min/max.
-                normalized_chunk =(chunk - patch_min) / (patch_max - patch_min + epsilon)
-                #normalized_chunk =chunk
-                
-                # Convert normalized patch to tensor and rearrange dimensions.
-                chunk_tensor = torch.tensor(normalized_chunk, dtype=torch.float32)
-                if chunk_tensor.dim() == 3:
-                    chunk_tensor = chunk_tensor.unsqueeze(0)
-                chunk_tensor = chunk_tensor.permute(0, 3, 1, 2).to(device)
-                
-                # Pass the normalized patch through the model.
-                with torch.no_grad():
-                    normalized_output = model(chunk_tensor)
-                    # Remove batch dimension, bring back to HWC order.
-                    normalized_output = normalized_output.squeeze().cpu().numpy().transpose(1, 2, 0)
-                
-                # Reverse normalization to bring output back to the original patch's dynamic range.
-                # (Multiply by the same range and add the min value.)
+                # Normalize the chunk to [0,1]
+                norm_chunk = (chunk - patch_min) / (patch_max - patch_min + epsilon)
+                #norm_chunk = chunk
+                h0, w0 = norm_chunk.shape[:2]
+
+                # If ONNX, pad to exactly chunk_size×chunk_size
+                if use_onnx and (h0 != chunk_size or w0 != chunk_size):
+                    padded = np.zeros((chunk_size, chunk_size, norm_chunk.shape[2]), dtype=norm_chunk.dtype)
+                    padded[:h0, :w0] = norm_chunk
+                    work = padded
+                else:
+                    work = norm_chunk
+
+                # Prepare tensor
+                tensor = torch.from_numpy(work.astype(np.float32))
+                tensor = tensor.unsqueeze(0).permute(0, 3, 1, 2)  # [1,H,W,C] → [1,C,H,W]
+
+                if use_onnx:
+                    ort_inputs = { session.get_inputs()[0].name: tensor.cpu().numpy() }
+                    ort_outs = session.run(None, ort_inputs)
+                    out = ort_outs[0][0]                  # [C,H,W]
+                    res = out.transpose(1, 2, 0)         # → [H,W,C]
+                    # crop back to original patch size if padded
+                    if (h0, w0) != (chunk_size, chunk_size):
+                        res = res[:h0, :w0, :]
+                    normalized_output = res
+                else:
+                    tensor = tensor.to(device)
+                    with torch.no_grad():
+                        out_t = model(tensor)            # [1,C,H,W]
+                    res = out_t.squeeze(0).cpu().numpy().transpose(1, 2, 0)
+                    normalized_output = res
+
+                # Reverse normalization into the patch's original range
                 starless_chunk = normalized_output * (patch_max - patch_min + epsilon) + patch_min
-                #starless_chunk = normalized_outpu
-                
+                #starless_chunk = normalized_output
                 starless_chunks.append((starless_chunk, i, j))
                 if progress_callback:
-                    progress_callback(f"Progress: {(idx + 1) / len(chunks) * 100:.2f}% ({idx + 1}/{len(chunks)} chunks processed)")
-            
-            return stitch_chunks_ignore_border(starless_chunks, processed_image_shape, chunk_size, overlap, border_size=5)
+                    progress_callback(
+                        f"Progress: {(idx + 1) / len(chunks) * 100:.2f}% "
+                        f"({idx + 1}/{len(chunks)} chunks processed)"
+                    )
+
+            return stitch_chunks_ignore_border(
+                starless_chunks,
+                processed_image_shape,
+                chunk_size,
+                overlap,
+                border_size=5
+            )
+
 
         if stretched_image.ndim == 2:
             processed_image = np.stack([stretched_image] * 3, axis=-1)
@@ -778,7 +852,7 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Dark Star V1.1                     # 
+ *#              Cosmic Clarity - Dark Star V2.0                     # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2025                              #
@@ -789,6 +863,14 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
         os.makedirs(output_dir)
 
     models = load_model(exe_dir, use_gpu)
+    # ─── If we're on ONNX, force the split size to the model's fixed input ───
+    if models["is_onnx"]:
+        session = models["starremoval_model"]
+        inp = session.get_inputs()[0]
+        # inp.shape == [1, 3, H, W]  →  H == W == 256 for your ONNX export
+        chunk_size = inp.shape[2]
+        overlap    = int(round(0.125 * chunk_size))
+        print(f"[ONNX] forcing chunk_size={chunk_size}, overlap={overlap}")
 
     all_images = [img for img in os.listdir(input_dir) if img.lower().endswith(('.tif', '.tiff', '.fits', '.fit', '.xisf', '.png'))]
 
@@ -809,55 +891,41 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
             output_image_path = os.path.join(output_dir, output_image_name + file_extension)
             actual_bit_depth = bit_depth
 
-# Save as FITS file with header information if the original was FITS
-            if file_extension in ['.fits', '.fit']:
-                if original_header is not None:
-                    if is_mono:  # Grayscale FITS
-                        # Convert the grayscale image back to its original 2D format
-                        if bit_depth == "16-bit":
-                            starless_image_fits = (starless_image[:, :, 0] * 65535).astype(np.uint16)
-                        elif bit_depth == "32-bit unsigned":
-                            bzero = original_header.get('BZERO', 0)
-                            bscale = original_header.get('BSCALE', 1)
-                            starless_image_fits = (starless_image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
-                            original_header['BITPIX'] = 32
-                        else:  # 32-bit float
-                            starless_image_fits = starless_image[:, :, 0].astype(np.float32)
-                        
-                        # Update header for a 2D (grayscale) image
-                        original_header['NAXIS'] = 2
-                        original_header['NAXIS1'] = starless_image.shape[1]  # Width
-                        original_header['NAXIS2'] = starless_image.shape[0]  # Height
-                        if 'NAXIS3' in original_header:
-                            del original_header['NAXIS3']  # Remove if present
+            # Save as FITS file with header information if the original was FITS
+            # Save as FITS file with header information if the original was FITS
+            if file_extension in ['.fits', '.fit'] and original_header is not None:
+                # 1) Prepare the 2D or 3D data array
+                if is_mono:
+                    # Grayscale → 2D
+                    if bit_depth == "16-bit":
+                        data = (starless_image[:, :, 0] * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        bzero  = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        data = (starless_image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+                    else:  # 32-bit float
+                        data = starless_image[:, :, 0].astype(np.float32)
+                else:
+                    # RGB → (3, H, W)
+                    arr = np.transpose(starless_image, (2, 0, 1))
+                    if bit_depth == "16-bit":
+                        data = (arr * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        data = arr.astype(np.float32)   # float32 is fine, BITPIX will be set to -32
+                    else:
+                        data = arr.astype(np.float32)
 
-                        hdu = fits.PrimaryHDU(starless_image_fits, header=original_header)
-                    
-                    else:  # RGB FITS
-                        # Transpose RGB image to FITS-compatible format (channels, height, width)
-                        starless_image_transposed = np.transpose(starless_image, (2, 0, 1))
+                # 2) Copy & clean the header
+                hdr = original_header.copy()
+                for key in ("BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "BSCALE", "BZERO"):
+                    if key in hdr:
+                        del hdr[key]
 
-                        if bit_depth == "16-bit":
-                            starless_image_fits = (starless_image_transposed * 65535).astype(np.uint16)
-                        elif bit_depth == "32-bit unsigned":
-                            starless_image_fits = starless_image_transposed.astype(np.float32)
-                            original_header['BITPIX'] = -32
-                            actual_bit_depth = "32-bit unsigned"
-                        else:
-                            starless_image_fits = starless_image_transposed.astype(np.float32)
-                            actual_bit_depth = "32-bit float"
+                # 3) Create a new PrimaryHDU with the cleaned header and new data
+                hdu = fits.PrimaryHDU(data=data, header=hdr)
+                hdu.writeto(output_image_path, overwrite=True)
+                print(f"Saved FITS starless image to: {output_image_path}")
 
-                        # Update header for a 3D (RGB) image
-                        original_header['NAXIS'] = 3
-                        original_header['NAXIS1'] = starless_image_transposed.shape[2]  # Width
-                        original_header['NAXIS2'] = starless_image_transposed.shape[1]  # Height
-                        original_header['NAXIS3'] = starless_image_transposed.shape[0]  # Channels
-                        
-                        hdu = fits.PrimaryHDU(starless_image_fits, header=original_header)
-
-                    # Write the FITS file
-                    hdu.writeto(output_image_path, overwrite=True)
-                    print(f"Saved {actual_bit_depth} starless image to: {output_image_path}")
 
 
             # Save as TIFF based on the original bit depth if the original was TIFF
