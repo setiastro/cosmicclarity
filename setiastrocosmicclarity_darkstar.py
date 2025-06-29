@@ -12,6 +12,7 @@ import platform
 import torch.nn as nn
 import tifffile as tiff
 from astropy.io import fits
+import torch.nn.functional as F
 from PIL import Image
 
 import argparse  # For command-line argument parsing
@@ -65,35 +66,32 @@ class DarkStarCNN(nn.Module):
         super().__init__()
 
         # ── ENCODER ───────────────────────────────────────
-        # Level 1: 3 → 16, *two extra* ResidualBlocks at 16
         self.encoder1 = nn.Sequential(
             nn.Conv2d(3, 16, 3, padding=1),
             nn.ReLU(inplace=True),
-            ResidualBlock(16),  # original
-            ResidualBlock(16),  # extra block to sharpen edges
-            ResidualBlock(16),  # another extra, if you want
+            ResidualBlock(16),
+            ResidualBlock(16),
+            ResidualBlock(16),
         )
-        # Level 2: 16 → 32, *two* ResidualBlocks at 32
         self.encoder2 = nn.Sequential(
             nn.Conv2d(16, 32, 3, padding=1),
             nn.ReLU(inplace=True),
             ResidualBlock(32),
             ResidualBlock(32),
+            ResidualBlock(32),
         )
-        # Level 3: 32 → 64, *one extra* ResidualBlock at 64
         self.encoder3 = nn.Sequential(
             nn.Conv2d(32, 64, 3, padding=2, dilation=2),
             nn.ReLU(inplace=True),
-            ResidualBlock(64),  # original
-            ResidualBlock(64),  # extra for star‐shape context
+            ResidualBlock(64),
+            ResidualBlock(64),
         )
-        # Level 4: 64 → 128 (keep just one block, since capacity is enough here)
         self.encoder4 = nn.Sequential(
             nn.Conv2d(64, 128, 3, padding=1),
             nn.ReLU(inplace=True),
             ResidualBlock(128),
+            ResidualBlock(128),
         )
-        # Level 5: 128 → 256 (single block; too deep to over-invest here)
         self.encoder5 = nn.Sequential(
             nn.Conv2d(128, 256, 3, padding=2, dilation=2),
             nn.ReLU(inplace=True),
@@ -101,51 +99,60 @@ class DarkStarCNN(nn.Module):
         )
 
         # ── DECODER ───────────────────────────────────────
-        # Decoder 5: (256 + 128) → 128, one ResidualBlock
         self.decoder5 = nn.Sequential(
             nn.Conv2d(256 + 128, 128, 3, padding=1),
             nn.ReLU(inplace=True),
             ResidualBlock(128),
+            ResidualBlock(128),
         )
-        # Decoder 4: (128 + 64) → 64, one ResidualBlock
         self.decoder4 = nn.Sequential(
             nn.Conv2d(128 + 64, 64, 3, padding=1),
             nn.ReLU(inplace=True),
             ResidualBlock(64),
+            ResidualBlock(64),
         )
-        # Decoder 3: → 32, *one extra* ResidualBlock at 32 (to preserve sharp edge reconstruction)
         self.decoder3 = nn.Sequential(
-            nn.Conv2d(64, 32, 3, padding=1),
+            nn.Conv2d(64 + 32, 32, 3, padding=1),
             nn.ReLU(inplace=True),
             ResidualBlock(32),
             ResidualBlock(32),
+            ResidualBlock(32),
         )
-        # Decoder 2: → 16, one ResidualBlock
         self.decoder2 = nn.Sequential(
-            nn.Conv2d(32, 16, 3, padding=1),
+            nn.Conv2d(32 + 16, 16, 3, padding=1),
             nn.ReLU(inplace=True),
             ResidualBlock(16),
+            ResidualBlock(16),
+            ResidualBlock(16),
         )
-        # Decoder 1 / Output: 16 → 3
+
+        # ── FINAL OUTPUT with EXTRA RESIDUALS ──────────────────────
+        # Instead of going straight 16→3, we lift back to 16, run a couple of
+        # ResidualBlocks, then project down to 3.
         self.decoder1 = nn.Sequential(
+            nn.Conv2d(16, 16, 3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualBlock(16),
+            ResidualBlock(16),
             nn.Conv2d(16, 3, 3, padding=1),
             nn.Sigmoid(),
         )
 
     def forward(self, x):
-        # ENCODING
-        e1 = self.encoder1(x)  # [B,16,H,W], high‐frequency focused
-        e2 = self.encoder2(e1) # [B,32,H,W], still on edges
-        e3 = self.encoder3(e2) # [B,64,H,W], has some star‐shape context
-        e4 = self.encoder4(e3) # [B,128,H,W], more global
-        e5 = self.encoder5(e4) # [B,256,H,W], very global
+        # encode
+        e1 = self.encoder1(x)
+        e2 = self.encoder2(e1)
+        e3 = self.encoder3(e2)
+        e4 = self.encoder4(e3)
+        e5 = self.encoder5(e4)
 
-        # DECODING (keeps only two top‐level skips)
-        d5 = self.decoder5(torch.cat([e5, e4], dim=1)) # → [B,128,H,W]
-        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # → [B,64,H,W]
-        d3 = self.decoder3(d4)                           # → [B,32,H,W]
-        d2 = self.decoder2(d3)                           # → [B,16,H,W]
-        return self.decoder1(d2)                         # → [B, 3,H,W]
+        # decode
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))
+        out = self.decoder1(d2)
+        return out
 
 # Cascaded model: two U-Nets in series.
 class CascadedStarRemovalNetCombined(nn.Module):
@@ -169,8 +176,6 @@ class CascadedStarRemovalNetCombined(nn.Module):
             else:
                 sd2 = ckpt2
             self.stage2.load_state_dict(sd2)
-        else:
-            print("Warning: no stage2 checkpoint, starting refinement from scratch")
 
         # --- Freeze only stage1 ---
         for p in self.stage1.parameters():
@@ -186,18 +191,19 @@ class CascadedStarRemovalNetCombined(nn.Module):
 # Get the directory of the executable or the script location.
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
-def load_model(exe_dir, use_gpu=True):
+def load_model(exe_dir, use_gpu=True, color=False):
     print(torch.__version__)
 
     is_windows = platform.system() == "Windows"
-    stage1_pth_path = os.path.join(exe_dir, 'darkstar_v2.0.pth')
+    ckpt_name = 'darkstar_v2.1c.pth' if color else 'darkstar_v2.1.pth'
+    stage1_pth_path = os.path.join(exe_dir, ckpt_name)
     stage1_onnx_path = os.path.splitext(stage1_pth_path)[0] + '.onnx'
     stage2_pth = None
 
     # Priority: Windows + CUDA → ONNX → CPU
     if is_windows:
         if use_gpu and torch.cuda.is_available():
-            print("Windows + CUDA detected. Using PyTorch with GPU.")
+            print(f"Windows + CUDA detected. Using PyTorch with GPU for {ckpt_name}")
             device = torch.device("cuda")
             model = CascadedStarRemovalNetCombined(stage1_pth_path, stage2_pth)
             model.eval()
@@ -208,7 +214,7 @@ def load_model(exe_dir, use_gpu=True):
                 "is_onnx": False
             }
         elif os.path.exists(stage1_onnx_path):
-            print("Windows detected. Using ONNX Runtime.")
+            print(f"Windows detected. Using ONNX Runtime for {stage1_onnx_path}.")
             providers = ['DmlExecutionProvider'] if use_gpu else ['CPUExecutionProvider']
             session = ort.InferenceSession(stage1_onnx_path, providers=providers)
             return {
@@ -360,7 +366,7 @@ class ProcessingThread(QThread):
 class StarRemovalUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity - Dark Star V2.0")
+        self.setWindowTitle("Cosmic Clarity - Dark Star V2.1c")
         self.setMinimumSize(400, 300)
         self.use_gpu = True
         self.star_removal_mode = "unscreen"
@@ -507,54 +513,134 @@ def replace_border(original_image, processed_image, border_size=5):
     return processed_image
 
 # Function to stretch an image
-def stretch_image(image):
+def stretch_image(image, target_median: float = 0.25):
     """
-    Perform a linear stretch on the image.
-    """
-    original_min = np.min(image)
-    stretched_image = image - original_min
-    original_median = np.median(stretched_image, axis=(0, 1)) if image.ndim == 3 else np.median(stretched_image)
-    
-    target_median = 0.25
-    if image.ndim == 3:
-        median_color = np.mean(np.median(stretched_image, axis=(0, 1)))
-        stretched_image = ((median_color - 1) * target_median * stretched_image) / (
-            median_color * (target_median + stretched_image - 1) - target_median * stretched_image)
-    else:
-        image_median = np.median(stretched_image)
-        stretched_image = ((image_median - 1) * target_median * stretched_image) / (
-            image_median * (target_median + stretched_image - 1) - target_median * stretched_image)
-    
-    stretched_image = np.clip(stretched_image, 0, 1)
-    
-    return stretched_image, original_min, original_median
+    Apply the same un-linked stretch that SetiAstroSuite uses.
 
-# Function to unstretch an image
-def unstretch_image(image, original_median, original_min):
+    Returns
+    -------
+    stretched_image : float32  in [0,1]
+    original_mins   : (3,) or scalar – per-channel black points
+    original_medians: (3,) or scalar – *median after rescale*, the value
+                      needed for perfect unstretch.
     """
-    Undo the stretch to return the image to the original linear state.
-    """
-    if image.ndim == 3:
-        median_color = np.mean(np.median(image, axis=(0, 1)))
-        unstretched_image = ((median_color - 1) * original_median * image) / \
-                            (median_color * (original_median + image - 1) - original_median * image)
-    else:
-        image_median = np.median(image)
-        unstretched_image = ((image_median - 1) * original_median * image) / \
-                            (image_median * (original_median + image - 1) - original_median * image)
+    img = image.astype(np.float32, copy=False)
 
-    unstretched_image = np.clip(unstretched_image, 0, 1)
-    unstretched_image += original_min
-    unstretched_image = np.clip(unstretched_image, 0, 1)
-    return unstretched_image
+    if img.ndim == 2:                    # mono
+        orig_min = img.min()
+        rescaled = (img - orig_min) / (1.0 - orig_min + 1e-12)
+
+        median_rescaled = np.median(rescaled)
+        numer  = (median_rescaled - 1.0) * target_median * rescaled
+        denom  = (median_rescaled *
+                  (target_median + rescaled - 1.0) -
+                  target_median * rescaled)
+        denom[ np.abs(denom) < 1e-12 ] = 1e-12
+        stretched = numer / denom
+
+        stretched = np.clip(stretched, 0.0, 1.0).astype(np.float32)
+        return stretched, np.float32(orig_min), np.float32(median_rescaled)
+
+    elif img.ndim == 3 and img.shape[2] == 3:   # RGB
+        H, W, C = img.shape
+        orig_min = img.reshape(-1, 3).min(axis=0)            # (3,)
+
+        # broadcast to H×W×3
+        rescaled = (img - orig_min.reshape(1, 1, 3)) / \
+                   (1.0 - orig_min.reshape(1, 1, 3) + 1e-12)
+
+        medians_rescaled = np.median(rescaled, axis=(0, 1))  # (3,)
+        # broadcast for formula
+        med_b = medians_rescaled.reshape(1, 1, 3)
+
+        numer = (med_b - 1.0) * target_median * rescaled
+        denom = med_b * (target_median + rescaled - 1.0) - target_median * rescaled
+        denom[np.abs(denom) < 1e-12] = 1e-12
+
+        stretched = numer / denom
+        stretched = np.clip(stretched, 0.0, 1.0).astype(np.float32)
+        return stretched, orig_min.astype(np.float32), medians_rescaled.astype(np.float32)
+
+    else:
+        raise ValueError("stretch_image expects mono or RGB image.")
+
+
+def unstretch_image(image, stretch_original_medians, stretch_original_mins):
+    """
+    Undo the un-linked stretch (mono or RGB).  Arguments must be the
+    *same* arrays returned by stretch_image.
+    """
+    img = image.astype(np.float32, copy=False)
+
+    if img.ndim == 2:                              # mono
+        cmed_stretched = np.median(img)
+        orig_med = float(stretch_original_medians)
+        orig_min = float(stretch_original_mins)
+
+        numer = (cmed_stretched - 1.0) * orig_med * img
+        denom = cmed_stretched * (orig_med + img - 1.0) - orig_med * img
+        denom[np.abs(denom) < 1e-12] = 1e-12
+
+        out = numer / denom
+        out += orig_min
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+    elif img.ndim == 3 and img.shape[2] == 3:      # RGB
+        H, W, C = img.shape
+        out = np.empty_like(img, dtype=np.float32)
+
+        for c in range(C):
+            cmed_stretched = np.median(img[..., c])
+            orig_med = stretch_original_medians[c]
+            orig_min = stretch_original_mins[c]
+
+            numer = (cmed_stretched - 1.0) * orig_med * img[..., c]
+            denom = cmed_stretched * (orig_med + img[..., c] - 1.0) \
+                    - orig_med * img[..., c]
+            mask = np.abs(denom) < 1e-12
+            denom[mask] = 1e-12
+
+            out[..., c] = numer / denom + orig_min
+
+        return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+    else:
+        raise ValueError("unstretch_image expects mono or RGB image.")
 
 # Function to add a border of median value around the image
-def add_border(image, border_size=5):
-    median_value = np.median(image)
-    if len(image.shape) == 2:
-        return np.pad(image, ((border_size, border_size), (border_size, border_size)), 'constant', constant_values=median_value)
+def add_border(image: np.ndarray, border_size: int = 5) -> np.ndarray:
+    """
+    Pad with each channel’s own median so the stretch stays un-linked.
+    Works for mono or RGB.
+    """
+    if image.ndim == 2:                           # mono
+        med = np.median(image)
+        return np.pad(
+            image,
+            ((border_size, border_size), (border_size, border_size)),
+            mode="constant",
+            constant_values=med
+        )
+
+    elif image.ndim == 3 and image.shape[2] == 3: # RGB
+        # channel-wise medians  → shape (3,)
+        meds = np.median(image, axis=(0, 1)).astype(image.dtype)
+
+        # pad each channel separately
+        padded_channels = []
+        for c in range(3):
+            ch = np.pad(
+                image[..., c],
+                ((border_size, border_size), (border_size, border_size)),
+                mode="constant",
+                constant_values=float(meds[c])     # scalar for this channel
+            )
+            padded_channels.append(ch)
+
+        return np.stack(padded_channels, axis=-1)
+
     else:
-        return np.pad(image, ((border_size, border_size), (border_size, border_size), (0, 0)), 'constant', constant_values=median_value)
+        raise ValueError("add_border expects mono or RGB image.")
 
 # Function to remove the border added around the image
 def remove_border(image, border_size=5):
@@ -566,9 +652,11 @@ def remove_border(image, border_size=5):
 
 
 # Main starremoval function for an image
-def starremoval_image(image_path, starremoval_strength, device, model,
-                      border_size=16, chunk_size=512, overlap=None, progress_callback=None):
-    use_onnx = isinstance(model, ort.InferenceSession)
+def starremoval_image(image_path, starremoval_strength,
+                      models_mono, models_color,
+                      border_size=16, chunk_size=512, overlap=None,
+                      progress_callback=None):
+
     try:
         file_extension = os.path.splitext(image_path)[1].lower()
         if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf']:
@@ -716,124 +804,111 @@ def starremoval_image(image_path, starremoval_strength, device, model,
 
         # Add a border around the image with the median value
         # Add a border around the image with the median value
-        image_with_border = add_border(image, border_size=5)
-        original_median = np.median(image_with_border)
+        # ─── stretch & pad ─────────────────────────────────────────────────
+        original_median = np.median(image)
         if original_median < 0.125:
-            stretched_image, original_min, original_median = stretch_image(image_with_border)
+            stretched_core, original_min, original_median = stretch_image(image)
         else:
-            stretched_image = image_with_border
+            stretched_core = image
             original_min = None
+        stretched_image = add_border(stretched_core, border_size=5)
 
-        # if PYTORCH, we'll send tensors to `device`; if ONNX, we ignore device
-        session = model if use_onnx else None
+        # ─── pick mono vs color model ───────────────────────────────────────
+        # true RGB if 3-channel and not all channels identical
+        is_true_rgb = (
+            stretched_image.ndim == 3 and stretched_image.shape[2] == 3 and
+            not (np.allclose(stretched_image[...,0], stretched_image[...,1]) and
+                 np.allclose(stretched_image[...,0], stretched_image[...,2]))
+        )
+        chosen = models_color if is_true_rgb else models_mono
+        device            = chosen["device"]
+        is_onnx           = chosen["is_onnx"]
+        starremoval_model = chosen["starremoval_model"]
+        session           = starremoval_model if is_onnx else None
 
-        def process_chunks(chunks, processed_image_shape):
+        # ─── chunk processor ────────────────────────────────────────────────
+        def process_chunks(chunks, processed_shape):
             starless_chunks = []
-            
             for idx, (chunk, i, j) in enumerate(chunks):
-                # Compute patch-specific normalization parameters.
-                patch_min, patch_max = chunk.min(), chunk.max()
-                epsilon = 1e-8
-                # Normalize the chunk to [0,1]
-                norm_chunk = (chunk - patch_min) / (patch_max - patch_min + epsilon)
-                #norm_chunk = chunk
-                h0, w0 = norm_chunk.shape[:2]
+                pmin, pmax = chunk.min(), chunk.max()
+                norm = (chunk - pmin) / (pmax - pmin + 1e-8)
+                h0, w0 = norm.shape[:2]
 
-                # If ONNX, pad to exactly chunk_size×chunk_size
-                if use_onnx and (h0 != chunk_size or w0 != chunk_size):
-                    padded = np.zeros((chunk_size, chunk_size, norm_chunk.shape[2]), dtype=norm_chunk.dtype)
-                    padded[:h0, :w0] = norm_chunk
-                    work = padded
+                # pad for ONNX
+                if is_onnx and (h0!=chunk_size or w0!=chunk_size):
+                    pad = np.zeros((chunk_size,chunk_size,norm.shape[2]), dtype=norm.dtype)
+                    pad[:h0,:w0] = norm
+                    work = pad
                 else:
-                    work = norm_chunk
+                    work = norm
 
-                # Prepare tensor
                 tensor = torch.from_numpy(work.astype(np.float32))
-                tensor = tensor.unsqueeze(0).permute(0, 3, 1, 2)  # [1,H,W,C] → [1,C,H,W]
+                tensor = tensor.unsqueeze(0).permute(0,3,1,2)  # [1,C,H,W]
 
-                if use_onnx:
-                    ort_inputs = { session.get_inputs()[0].name: tensor.cpu().numpy() }
-                    ort_outs = session.run(None, ort_inputs)
-                    out = ort_outs[0][0]                  # [C,H,W]
-                    res = out.transpose(1, 2, 0)         # → [H,W,C]
-                    # crop back to original patch size if padded
-                    if (h0, w0) != (chunk_size, chunk_size):
-                        res = res[:h0, :w0, :]
-                    normalized_output = res
+                if is_onnx:
+                    inp_name = session.get_inputs()[0].name
+                    out = session.run(None, {inp_name: tensor.cpu().numpy()})[0][0]
+                    res = out.transpose(1,2,0)
+                    if (h0,w0) != (chunk_size,chunk_size):
+                        res = res[:h0,:w0,:]
                 else:
                     tensor = tensor.to(device)
                     with torch.no_grad():
-                        out_t = model(tensor)            # [1,C,H,W]
-                    res = out_t.squeeze(0).cpu().numpy().transpose(1, 2, 0)
-                    normalized_output = res
+                        out_t = starremoval_model(tensor)
+                    res = out_t.squeeze(0).cpu().numpy().transpose(1,2,0)
 
-                # Reverse normalization into the patch's original range
-                starless_chunk = normalized_output * (patch_max - patch_min + epsilon) + patch_min
-                #starless_chunk = normalized_output
-                starless_chunks.append((starless_chunk, i, j))
+                starless = res * (pmax - pmin + 1e-8) + pmin
+                starless_chunks.append((starless, i, j))
+
                 if progress_callback:
                     progress_callback(
-                        f"Progress: {(idx + 1) / len(chunks) * 100:.2f}% "
-                        f"({idx + 1}/{len(chunks)} chunks processed)"
+                        f"Progress: {(idx+1)/len(chunks)*100:.2f}% "
+                        f"({idx+1}/{len(chunks)} chunks)"
                     )
 
             return stitch_chunks_ignore_border(
-                starless_chunks,
-                processed_image_shape,
-                chunk_size,
-                overlap,
-                border_size=5
+                starless_chunks, processed_shape,
+                chunk_size, overlap, border_size=5
             )
 
-
+        # ─── dispatch by image shape ────────────────────────────────────────
         if stretched_image.ndim == 2:
-            processed_image = np.stack([stretched_image] * 3, axis=-1)
-            chunks = split_image_into_chunks_with_overlap(processed_image, chunk_size, overlap)
-            starless_image = process_chunks(chunks, processed_image.shape)
+            # mono → stack→one pass
+            proc = np.stack([stretched_image]*3, axis=-1)
+            chunks = split_image_into_chunks_with_overlap(proc, chunk_size, overlap)
+            starless = process_chunks(chunks, proc.shape)
             if original_min is not None:
-                starless_image = unstretch_image(starless_image, original_median, original_min)
-            final_starless = starless_image[5:5 + original_image.shape[0], 5:5 + original_image.shape[1]]
+                starless = unstretch_image(starless, original_median, original_min)
+            final_starless = starless[5:5+original_image.shape[0], 5:5+original_image.shape[1]]
 
-        elif stretched_image.ndim == 3 and stretched_image.shape[-1] == 1:
-            processed_image = np.concatenate([stretched_image] * 3, axis=-1)
-            chunks = split_image_into_chunks_with_overlap(processed_image, chunk_size, overlap)
-            starless_image = process_chunks(chunks, processed_image.shape)
+        elif stretched_image.ndim == 3 and stretched_image.shape[2] == 1:
+            # single‐channel in 3D → same as mono
+            proc = np.concatenate([stretched_image]*3, axis=-1)
+            chunks = split_image_into_chunks_with_overlap(proc, chunk_size, overlap)
+            starless = process_chunks(chunks, proc.shape)
             if original_min is not None:
-                starless_image = unstretch_image(starless_image, original_median, original_min)
-            final_starless = starless_image[5:5 + original_image.shape[0], 5:5 + original_image.shape[1]]
+                starless = unstretch_image(starless, original_median, original_min)
+            final_starless = starless[5:5+original_image.shape[0], 5:5+original_image.shape[1]]
 
-        elif stretched_image.ndim == 3 and stretched_image.shape[-1] == 3:
-            if (np.allclose(stretched_image[..., 0], stretched_image[..., 1]) and
-                np.allclose(stretched_image[..., 0], stretched_image[..., 2])):
-                print("Detected 3-channel mono image (channels are identical). Processing only the first channel.")
-                channel_data = stretched_image[..., 0]
-                processed_image = np.stack([channel_data] * 3, axis=-1)
-                chunks = split_image_into_chunks_with_overlap(processed_image, chunk_size, overlap)
-                starless_image = process_chunks(chunks, processed_image.shape)
-                if original_min is not None:
-                    starless_image = unstretch_image(starless_image, original_median, original_min)
-                final_starless = starless_image[5:5 + original_image.shape[0], 5:5 + original_image.shape[1]]
-            else:
-                print("Detected true RGB image with 3 channels. Processing each channel individually.")
-                processed_channels = []
-                for ch in range(3):
-                    if progress_callback:
-                        progress_callback(f"Processing channel {ch + 1}/3")
-                    channel_data = stretched_image[..., ch]
-                    # Duplicate the single channel to create a 3-channel image for model input
-                    channel_input = np.stack([channel_data] * 3, axis=-1)  # shape (H, W, 3)
-                    chunks = split_image_into_chunks_with_overlap(channel_input, chunk_size, overlap)
-                    channel_starless = process_chunks(chunks, channel_input.shape)
-                    if original_min is not None:
-                        channel_starless = unstretch_image(channel_starless, original_median, original_min)
-                    # Crop the border; now take only one channel (e.g., channel 0) as the final processed channel
-                    channel_starless_final = channel_starless[5:5 + original_image.shape[0],
-                                                                5:5 + original_image.shape[1], 0]
-                    processed_channels.append(channel_starless_final)
-                # Stack the three processed channels to obtain a final output with shape (height, width, 3)
-                final_starless = np.stack(processed_channels, axis=-1)
         else:
-            raise ValueError("Unsupported image format.")
+            # stretched_image.ndim==3 && shape[2]==3
+            if not is_true_rgb:
+                # 3-chan mono → treat like mono
+                ch = stretched_image[...,0]
+                proc = np.stack([ch]*3, axis=-1)
+                chunks = split_image_into_chunks_with_overlap(proc, chunk_size, overlap)
+                starless = process_chunks(chunks, proc.shape)
+                if original_min is not None:
+                    starless = unstretch_image(starless, original_median, original_min)
+                final_starless = starless[5:5+original_image.shape[0], 5:5+original_image.shape[1]]
+            else:
+                # true RGB → full‐color one pass
+                proc = stretched_image
+                chunks = split_image_into_chunks_with_overlap(proc, chunk_size, overlap)
+                starless = process_chunks(chunks, proc.shape)
+                if original_min is not None:
+                    starless = unstretch_image(starless, original_median, original_min)
+                final_starless = starless[5:5+original_image.shape[0], 5:5+original_image.shape[1]]
 
         return final_starless, original_header, bit_depth, file_extension, is_mono, file_meta, original_image
 
@@ -852,7 +927,7 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Dark Star V2.0                     # 
+ *#              Cosmic Clarity - Dark Star V2.1c                    # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2025                              #
@@ -862,17 +937,29 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    models = load_model(exe_dir, use_gpu)
-    # ─── If we're on ONNX, force the split size to the model's fixed input ───
-    if models["is_onnx"]:
-        session = models["starremoval_model"]
+    # ─── load both mono and color versions ───────────────────────────
+    models_mono  = load_model(exe_dir, use_gpu, color=False)
+    models_color = load_model(exe_dir, use_gpu, color=True)
+
+    # ─── if either model is ONNX, pick it to force chunk_size & overlap ───
+    onnx_info = None
+    if models_mono["is_onnx"]:
+        onnx_info = models_mono
+    elif models_color["is_onnx"]:
+        onnx_info = models_color
+
+    if onnx_info:
+        session = onnx_info["starremoval_model"]
         inp = session.get_inputs()[0]
-        # inp.shape == [1, 3, H, W]  →  H == W == 256 for your ONNX export
+        # inp.shape == [1, 3, H, W]
         chunk_size = inp.shape[2]
         overlap    = int(round(0.125 * chunk_size))
         print(f"[ONNX] forcing chunk_size={chunk_size}, overlap={overlap}")
 
-    all_images = [img for img in os.listdir(input_dir) if img.lower().endswith(('.tif', '.tiff', '.fits', '.fit', '.xisf', '.png'))]
+    all_images = [
+        img for img in os.listdir(input_dir)
+        if img.lower().endswith(('.tif', '.tiff', '.fits', '.fit', '.xisf', '.png'))
+    ]
 
     for idx, image_name in enumerate(all_images):
         image_path = os.path.join(input_dir, image_name)
@@ -880,9 +967,16 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
         if progress_callback:
             progress_callback(f"Processing image {idx + 1}/{len(all_images)}: {image_name}")
 
-        starless_image, original_header, bit_depth, file_extension, is_mono, file_meta, original_image = starremoval_image(
-            image_path, 1.0, models['device'], models["starremoval_model"],
-            border_size=16, chunk_size=chunk_size, overlap=overlap,
+        # ─── dispatch to starremoval_image with both model infos ───
+        starless_image, original_header, bit_depth, file_extension, \
+        is_mono, file_meta, original_image = starremoval_image(
+            image_path,
+            starremoval_strength=1.0,
+            models_mono=models_mono,
+            models_color=models_color,
+            border_size=16,
+            chunk_size=chunk_size,
+            overlap=overlap,
             progress_callback=progress_callback
         )
 
