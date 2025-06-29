@@ -13,11 +13,12 @@ import platform
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
-import tkinter as tk
-from tkinter import simpledialog, messagebox
-from tkinter import ttk
-import argparse  # For command-line argument parsing
 
+import argparse  # For command-line argument parsing
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QLabel, QPushButton, QVBoxLayout, QSlider, QComboBox,QCheckBox
+)
+from PyQt6.QtCore import Qt
 
 
 
@@ -25,6 +26,18 @@ import argparse  # For command-line argument parsing
 
 # Suppress model loading warnings
 warnings.filterwarnings("ignore")
+
+# Detect broken fp16/mixed-precision support
+def has_broken_fp16():
+    try:
+        cc = torch.cuda.get_device_capability()
+        return cc[0] < 8  # For example, <8 means <Turing (RTX 20xx)
+    except:
+        return True
+
+DISABLE_MIXED_PRECISION = has_broken_fp16()
+if DISABLE_MIXED_PRECISION:
+    print("[INFO] Mixed precision disabled due to unsupported GPU capability.")
 
 # Define the ResidualBlock
 class ResidualBlock(nn.Module):
@@ -118,75 +131,80 @@ class DenoiseCNN(nn.Module):
 
         return d1
 
-
 # Get the directory of the executable or the script location
 exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
 
 cached_models = None  # Cache to avoid reloading models unnecessarily
 
-
 def load_models(exe_dir, use_gpu=True):
-    """
-    Load denoise models with support for MPS (macOS) and CPU fallback.
-
-    Args:
-        exe_dir (str): Path to the executable directory.
-        use_gpu (bool): Whether to use GPU acceleration.
-
-    Returns:
-        dict: A dictionary containing the loaded models and their configurations.
-    """
     global cached_models
-    device = None
-
     if cached_models:
         return cached_models
 
-    # Check for MPS (Metal Performance Shaders) on macOS
+    # 1) Decide whether to use PyTorch or ONNX
+    #    - Prefer PyTorch on MPS (macOS) if available
+    #    - Otherwise fall back to ONNX with CPU EP if no MPS GPU present and use_gpu=True
+    #    - Finally fall back to PyTorch on CPU
     if torch.backends.mps.is_available() and use_gpu:
-        print("Using device: MPS (Metal Performance Shaders)")
         device = torch.device("mps")
+        is_onnx = False
 
-        denoise_model = DenoiseCNN().to(device)
+    elif use_gpu:
+        # On macOS there's no DML EP; try ONNX CPU EP
+        device = None
+        is_onnx = True
 
-        # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3.pth"), map_location=device)
-        if "model_state_dict" in checkpoint:
-            denoise_model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            denoise_model.load_state_dict(checkpoint)  # Assume it's just the state dict
-
-        denoise_model.eval()
-
-        cached_models = {
-            "denoise_model": denoise_model,
-            "device": device,
-            "is_onnx": False,
-        }
-        return cached_models
-
-    # Fallback to CPU
     else:
-        print("Using device: CPU (PyTorch)")
         device = torch.device("cpu")
+        is_onnx = False
 
-        denoise_model = DenoiseCNN().to(device)
+    mono_model = None
+    color_model = None
 
-        # Load only the model state dict
-        checkpoint = torch.load(os.path.join(exe_dir, "deep_denoise_cnn_AI3.pth"), map_location=device)
-        if "model_state_dict" in checkpoint:
-            denoise_model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            denoise_model.load_state_dict(checkpoint)  # Assume it's just the state dict
+    if not is_onnx:
+        # ── PyTorch path ────────────────────────────────────────────────────
+        # Mono model
+        mono = DenoiseCNN().to(device)
+        cp1 = torch.load(
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.pth"),
+            map_location=device
+        )
+        mono.load_state_dict(cp1.get("model_state_dict", cp1))
+        mono.eval()
 
-        denoise_model.eval()
+        # Color model
+        color = DenoiseCNN().to(device)
+        cp2 = torch.load(
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5c.pth"),
+            map_location=device
+        )
+        color.load_state_dict(cp2.get("model_state_dict", cp2))
+        color.eval()
 
-        cached_models = {
-            "denoise_model": denoise_model,
-            "device": device,
-            "is_onnx": False,
-        }
-        return cached_models
+        mono_model, color_model = mono, color
+
+    else:
+        # ── ONNX path ───────────────────────────────────────────────────────
+        # Use CPUExecutionProvider on macOS
+        providers = ["CPUExecutionProvider"]
+
+        mono_model = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.onnx"),
+            providers=providers
+        )
+        color_model = ort.InferenceSession(
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5c.onnx"),
+            providers=providers
+        )
+
+    cached_models = {
+        "device":      device,
+        "is_onnx":     is_onnx,
+        "mono_model":  mono_model,
+        "color_model": color_model
+    }
+    print(f"Loaded models → ONNX={is_onnx}, Device={device}")
+    return cached_models
 
 
 
@@ -294,51 +312,75 @@ def stitch_chunks_ignore_border(chunks, image_shape, chunk_size, overlap, border
 def blend_images(before, after, amount):
     return (1 - amount) * before + amount * after
 
-# Function to get user input for denoise strength (Interactive)
+class DenoiseUI(QDialog):
+    def __init__(self):
+        """
+        Creates the PyQt6 UI for selecting denoise options.
+        """
+        super().__init__()
+
+        self.setWindowTitle("Cosmic Clarity Denoise Tool")
+        self.setFixedSize(300, 250)
+
+        layout = QVBoxLayout()
+
+        # GPU Selection
+        self.gpu_label = QLabel("Use GPU Acceleration:")
+        layout.addWidget(self.gpu_label)
+
+        self.gpu_dropdown = QComboBox()
+        self.gpu_dropdown.addItems(["Yes", "No"])
+        self.gpu_dropdown.setCurrentIndex(0)  # Default: Yes
+        layout.addWidget(self.gpu_dropdown)
+
+        # Denoise Strength Slider
+        self.denoise_strength_label = QLabel("Denoise Strength (0-1):")
+        layout.addWidget(self.denoise_strength_label)
+
+        self.denoise_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.denoise_strength_slider.setMinimum(0)
+        self.denoise_strength_slider.setMaximum(100)
+        self.denoise_strength_slider.setValue(90)  # Default: 0.9
+        self.denoise_strength_slider.setTickInterval(1)
+        self.denoise_strength_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        layout.addWidget(self.denoise_strength_slider)
+
+        # Denoise Mode Dropdown
+        self.denoise_mode_label = QLabel("Denoise Mode:")
+        layout.addWidget(self.denoise_mode_label)
+
+        self.denoise_mode_dropdown = QComboBox()
+        self.denoise_mode_dropdown.addItems(["full", "luminance"])
+        layout.addWidget(self.denoise_mode_dropdown)
+
+        # 4) Separate‐channels checkbox (new)
+        self.sep_check = QCheckBox("Process each RGB channel separately")
+        self.sep_check.setChecked(False)
+        layout.addWidget(self.sep_check)
+
+        # Submit Button
+        self.submit_button = QPushButton("Submit")
+        self.submit_button.clicked.connect(self.accept)
+        layout.addWidget(self.submit_button)
+
+        self.setLayout(layout)
+
+    def get_user_selection(self):
+        result = self.exec()
+        use_gpu          = (self.gpu_dropdown.currentText() == "Yes")
+        denoise_strength = self.denoise_strength_slider.value() / 100.0
+        denoise_mode     = self.denoise_mode_dropdown.currentText().lower()
+        separate_channels= self.sep_check.isChecked()
+        return use_gpu, denoise_strength, denoise_mode, separate_channels
+
+
+
+# Function to call the new PyQt6 UI
 def get_user_input():
-    # Define global variables to store the user input
-    global use_gpu, denoise_strength, denoise_mode
-
-    def on_submit():
-        # Update the global variables with the user's selections
-        global use_gpu, denoise_strength, denoise_mode
-        use_gpu = gpu_var.get() == "Yes"
-        denoise_strength = denoise_strength_slider.get()
-        denoise_mode = denoise_mode_var.get().lower()  # Convert to lowercase for consistency
-        root.quit()  # Quit the main loop to continue
-
-    root = tk.Tk()
-    root.title("Cosmic Clarity Denoise Tool")
-
-    # GPU selection
-    gpu_label = ttk.Label(root, text="Use GPU Acceleration:")
-    gpu_label.pack(pady=5)
-    gpu_var = tk.StringVar(value="Yes")
-    gpu_dropdown = ttk.OptionMenu(root, gpu_var, "Yes", "Yes", "No")
-    gpu_dropdown.pack()
-
-    # Denoise strength slider
-    denoise_strength_label = ttk.Label(root, text="Denoise Strength (0-1):")
-    denoise_strength_label.pack(pady=5)
-    denoise_strength_slider = tk.Scale(root, from_=0, to=1, resolution=0.01, orient="horizontal")
-    denoise_strength_slider.set(0.9)  # Set the default value to 0.9
-    denoise_strength_slider.pack()
-
-    # Denoise mode selection
-    denoise_mode_label = ttk.Label(root, text="Denoise Mode:")
-    denoise_mode_label.pack(pady=5)
-    denoise_mode_var = tk.StringVar(value="full")  # Set default value to "full"
-    denoise_mode_dropdown = ttk.OptionMenu(root, denoise_mode_var, "full", "luminance", "full")
-    denoise_mode_dropdown.pack()
-
-    # Submit button
-    submit_button = ttk.Button(root, text="Submit", command=on_submit)
-    submit_button.pack(pady=20)
-
-    root.mainloop()  # Run the main event loop
-    root.destroy()  # Destroy the window after quitting the loop
-
-    return use_gpu, denoise_strength, denoise_mode
+    app = QApplication([])
+    ui = DenoiseUI()
+    use_gpu, denoise_strength, denoise_mode, separate_channels = ui.get_user_selection()
+    return use_gpu, denoise_strength, denoise_mode, separate_channels
 
 # Function to show progress during chunk processing
 def show_progress(current, total):
@@ -452,12 +494,24 @@ def unstretch_image(image, original_medians, original_min):
 
 
 # Function to add a border of median value around the image
-def add_border(image, border_size=5):
-    median_value = np.median(image)
-    if len(image.shape) == 2:
-        return np.pad(image, ((border_size, border_size), (border_size, border_size)), 'constant', constant_values=median_value)
+def add_border(image, border_size=16):
+    if image.ndim == 2:                                # mono
+        med = np.median(image)
+        return np.pad(image,
+                      ((border_size, border_size), (border_size, border_size)),
+                      mode="constant",
+                      constant_values=med)
+
+    elif image.ndim == 3 and image.shape[2] == 3:       # RGB
+        meds = np.median(image, axis=(0, 1)).astype(image.dtype)  # (3,)
+        padded = [np.pad(image[..., c],
+                         ((border_size, border_size), (border_size, border_size)),
+                         mode="constant",
+                         constant_values=float(meds[c]))
+                  for c in range(3)]
+        return np.stack(padded, axis=-1)
     else:
-        return np.pad(image, ((border_size, border_size), (border_size, border_size), (0, 0)), 'constant', constant_values=median_value)
+        raise ValueError("add_border expects mono or RGB image.")
 
 # Function to remove the border added around the image
 def remove_border(image, border_size=5):
@@ -467,7 +521,11 @@ def remove_border(image, border_size=5):
         return image[border_size:-border_size, border_size:-border_size, :]
 
 # Function to denoise the image
-def denoise_image(image_path, denoise_strength, device, model, denoise_mode='luminance', is_onnx=False):
+def denoise_image(image_path: str,
+                  denoise_strength: float,
+                  models: dict,
+                  denoise_mode: str = 'luminance',
+                  separate_channels: bool = False):
     """
     Denoises the input image using the specified model and mode.
 
@@ -482,6 +540,11 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
     Returns:
         tuple: Denoised image, original header, bit depth, file extension, is_mono, and metadata.
     """
+    device      = models["device"]
+    is_onnx     = models["is_onnx"]
+    mono_model  = models["mono_model"]
+    color_model = models["color_model"]
+
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
     if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', 'jpg', 'jpeg']:
@@ -548,28 +611,40 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
                     print("Identified 32bit unsigned FITS image.")
                 
                 # Handle 3D FITS data (e.g., RGB or multi-layered data)
-                if image_data.ndim == 3 and image_data.shape[0] == 3:
-                    image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
+                if image_data.ndim == 3:
+                    print(f"Detected 3D FITS data with shape: {image_data.shape}")
                     
-                    if bit_depth == "16-bit":
-                        image = image.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
-                    elif bit_depth == "32-bit unsigned":
-                        # Apply BSCALE and BZERO if present
-                        bzero = original_header.get('BZERO', 0)  # Default to 0 if not present
-                        bscale = original_header.get('BSCALE', 1)  # Default to 1 if not present
+                    if image_data.shape[0] == 3:
+                        # Assume RGB in (3, H, W) format
+                        image = np.transpose(image_data, (1, 2, 0))  # Convert to (H, W, 3)
+                        
+                        if bit_depth == "16-bit":
+                            image = image.astype(np.float32) / 65535.0
+                        elif bit_depth == "32-bit unsigned":
+                            bzero = original_header.get('BZERO', 0)
+                            bscale = original_header.get('BSCALE', 1)
+                            image = image.astype(np.float32) * bscale + bzero
+                            image_min = image.min()
+                            image_max = image.max()
+                            image = (image - image_min) / (image_max - image_min)
+                            print(f"Image range after applying BZERO and BSCALE (RGB): min={image_min}, max={image_max}")
+                        # No need to normalize float32
+                        is_mono = False
 
-                        # Convert to float and apply the scaling and offset
-                        image = image.astype(np.float32) * bscale + bzero
+                    elif image_data.shape[0] == 1:
+                        # Single-channel mono FITS in (1, H, W) format
+                        image = image_data[0]  # Drop channel dim, now (H, W)
+                        image = np.stack([image] * 3, axis=-1)  # Convert to RGB shape (H, W, 3)
+                        is_mono = True
 
-                        # Normalize based on the actual data range
-                        image_min = image.min()  # Get the min value after applying BZERO
-                        image_max = image.max()  # Get the max value after applying BZERO
+                    elif image_data.shape[2] == 1:
+                        # Shape (H, W, 1) — mono with trailing singleton dim
+                        image = image_data[:, :, 0]
+                        image = np.stack([image] * 3, axis=-1)
+                        is_mono = True
 
-                        # Normalize the image data to the range [0, 1]
-                        image = (image - image_min) / (image_max - image_min)
-                        print(f"Image range after applying BZERO and BSCALE (3D case): min={image_min}, max={image_max}")
-
-                    is_mono = False  # RGB data
+                    else:
+                        raise ValueError(f"Unsupported 3D FITS shape: {image_data.shape}")
 
                 # Handle 2D FITS data (grayscale)
                 elif image_data.ndim == 2:
@@ -642,20 +717,19 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
             raise ValueError(f"Failed to load image from: {image_path}")
 
         # Add a border around the image with the median value
-        image_with_border = add_border(image, border_size=16)
-       
-        # Check if the image needs stretching based on its median value
-        stretch_needed = np.median(image_with_border - np.min(image_with_border)) < 0.05
+        stretch_needed = np.median(image - np.min(image)) < 0.05   # decision first
 
         if stretch_needed:
             print("normalizing linear data")
-            # Stretch the image
-            stretched_image, original_min, original_medians = stretch_image(image_with_border)
+            stretched_core, original_min, original_medians = stretch_image(image)
         else:
-            # If no stretch is needed, use the original image directly
-            stretched_image = image_with_border
-            original_min = np.min(image_with_border)
-            original_medians = [np.median(image_with_border[..., c]) for c in range(3)] if image_with_border.ndim == 3 else [np.median(image_with_border)]
+            stretched_core   = image.astype(np.float32, copy=False)
+            original_min     = np.min(image)
+            original_medians = [np.median(image[..., c]) for c in range(3)] \
+                            if image.ndim == 3 else [np.median(image)]
+
+        # pad AFTER stretch, per-channel median
+        stretched_image = add_border(stretched_core, border_size=16)
 
         # **Apply TV Denoise on the full image unconditionally**
         #tv_weight = 0.005  # Fixed weight for TV denoising
@@ -668,42 +742,43 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
 
         # Process mono or color images
         if is_mono:
-            denoised_image = denoise_channel(
-                stretched_image[:, :, 0], device, model, is_mono=True, is_onnx=is_onnx
-            )
-            denoised_image = blend_images(stretched_image[:, :, 0], denoised_image, denoise_strength)
-            denoised_image = denoised_image[:, :, np.newaxis]  # Convert back to single channel
+            # use mono network on channel 0
+            mono_net = models["mono_model"]
+            den_r = denoise_channel(stretched_image[...,0], models["device"], mono_net, True, models["is_onnx"])
+            den = denoise_strength * den_r + (1-denoise_strength)*stretched_image[...,0]
+            denoised_image = den[...,None]
 
-        else:  # Color image
-            if denoise_mode == 'luminance':
-                # Extract luminance and chrominance channels
-                luminance, cb_channel, cr_channel = extract_luminance(stretched_image)
+        else:
+            # 1) separate‐channels override
+            if separate_channels:
+                out_ch = []
+                for c in range(3):
+                    dch = denoise_channel(
+                        stretched_image[...,c],
+                        models["device"],
+                        models["mono_model"],
+                        True, models["is_onnx"]
+                    )
+                    blended = blend_images(stretched_image[...,c], dch, denoise_strength)
+                    out_ch.append(blended)
+                denoised_image = np.stack(out_ch, axis=-1)
 
-                # Denoise only the luminance channel
-                denoised_luminance = denoise_channel(
-                    luminance, device, model, is_mono=True, is_onnx=is_onnx
+            # 2) luminance only
+            elif denoise_mode == 'luminance':
+                y, cb, cr = extract_luminance(stretched_image)
+                den_y = denoise_channel(
+                    y,
+                    models["device"],
+                    models["mono_model"],
+                    True, models["is_onnx"]
                 )
-                denoised_luminance = blend_images(luminance, denoised_luminance, denoise_strength)
+                y2 = blend_images(y, den_y, denoise_strength)
+                denoised_image = merge_luminance(y2, cb, cr)
 
-                # Merge denoised luminance back with chrominance channels
-                denoised_image = merge_luminance(denoised_luminance, cb_channel, cr_channel)
+            else:  # 'full'
+                # full RGB network
+                denoised_image = denoise_full_rgb(stretched_image, models, denoise_strength)
 
-            else:  # Full RGB denoising mode
-                denoised_r = denoise_channel(
-                    stretched_image[:, :, 0], device, model, is_mono=True, is_onnx=is_onnx
-                )
-                denoised_g = denoise_channel(
-                    stretched_image[:, :, 1], device, model, is_mono=True, is_onnx=is_onnx
-                )
-                denoised_b = denoise_channel(
-                    stretched_image[:, :, 2], device, model, is_mono=True, is_onnx=is_onnx
-                )
-
-                denoised_image = np.stack([
-                    blend_images(stretched_image[:, :, 0], denoised_r, denoise_strength),
-                    blend_images(stretched_image[:, :, 1], denoised_g, denoise_strength),
-                    blend_images(stretched_image[:, :, 2], denoised_b, denoise_strength)
-                ], axis=-1)
 
         # Unstretch the image
         if stretch_needed:
@@ -721,6 +796,66 @@ def denoise_image(image_path, denoise_strength, device, model, denoise_mode='lum
         print(f"Error reading image {image_path}: {e}")
         return None, None, None, None, None, None, None
     
+def denoise_full_rgb(image_rgb, models, denoise_strength):
+    """
+    image_rgb: H×W×3 float32 in [0,1]
+    models: dict from load_models()
+    """
+    device    = models["device"]
+    is_onnx   = models["is_onnx"]
+    session   = models["color_model"]
+    chunk_size, overlap = 256, 64
+    eps = 1e-8
+
+    # 1) Chop into overlapping chunks
+    chunks = split_image_into_chunks_with_overlap(image_rgb, chunk_size, overlap)
+    denoised_chunks = []
+
+    for idx, (chunk, i, j) in enumerate(chunks):
+        h, w, _ = chunk.shape
+
+        # 2) Compute per-channel min/max for THIS chunk: shape (1,1,3)
+        #pmin  = chunk.min(axis=(0,1), keepdims=True)
+        #pmax  = chunk.max(axis=(0,1), keepdims=True)
+        #denom = np.maximum(pmax - pmin, eps)
+
+        # 3) Normalize chunk per-channel
+        #norm = (chunk - pmin) / denom
+        norm = chunk
+
+        # 4) Run the model on the normalized chunk
+        if is_onnx:
+            inp = norm.transpose(2,0,1)[None].astype(np.float32)  # (1,3,H,W)
+            inp = np.pad(inp,
+                         ((0,0),(0,0),(0,chunk_size-h),(0,chunk_size-w)),
+                         mode="constant")
+            name = session.get_inputs()[0].name
+            out = session.run(None, {name: inp})[0]
+            out_norm = out[0, :, :h, :w].transpose(1,2,0)
+        else:
+            t = torch.from_numpy(norm).permute(2,0,1)[None].to(device)
+            with torch.no_grad():
+                if not DISABLE_MIXED_PRECISION and device.type=="cuda":
+                    with torch.cuda.amp.autocast():
+                        out_t = session(t)
+                else:
+                    out_t = session(t)
+            out_norm = out_t.squeeze(0).cpu().permute(1,2,0).numpy()
+
+        # 5) Blend in normalized space
+        blended_norm = blend_images(norm, out_norm, denoise_strength)
+
+        # 6) Un-normalize back to original chunk range
+        #blended = blended_norm * denom + pmin
+        blended = blended_norm
+
+        denoised_chunks.append((blended, i, j))
+        show_progress(idx+1, len(chunks))
+
+    # 7) Stitch all chunks back together
+    fused = stitch_chunks_ignore_border(denoised_chunks, image_rgb.shape, chunk_size, overlap)
+    return fused
+
 # Function to denoise a single channel
 def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
     """
@@ -740,9 +875,19 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
     overlap = 64
     chunks = split_image_into_chunks_with_overlap(channel, chunk_size=chunk_size, overlap=overlap)
 
+    # Debug: validate chunk structure
+    for idx, entry in enumerate(chunks[:3]):
+        print(f"Chunk {idx} type: {type(entry)}, length: {len(entry) if isinstance(entry, tuple) else 'N/A'}")
+
     denoised_chunks = []
 
-    for idx, (chunk, i, j) in enumerate(chunks):
+    for idx, entry in enumerate(chunks):
+        try:
+            chunk, i, j = entry
+        except Exception as e:
+            print(f"❌ Failed to unpack chunk {idx}: {entry} ({e})")
+            continue
+
         original_chunk_shape = chunk.shape
         if is_onnx:
             # Prepare ONNX input: Expand to 3 channels
@@ -751,63 +896,84 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
 
             # Pad the chunk to 256x256 if necessary
             if chunk_input.shape[2] != chunk_size or chunk_input.shape[3] != chunk_size:
-                padded_chunk = np.zeros((1, 3, chunk_size, chunk_size), dtype=np.float32)  # Create empty padded array
-                padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input  # Copy data into padded array
+                padded_chunk = np.zeros((1, 3, chunk_size, chunk_size), dtype=np.float32)
+                padded_chunk[:, :, :chunk_input.shape[2], :chunk_input.shape[3]] = chunk_input
                 chunk_input = padded_chunk
 
             # ONNX inference
             input_name = model.get_inputs()[0].name
             try:
-                denoised_chunk = model.run(None, {input_name: chunk_input})[0]  # Run ONNX model
-                denoised_chunk = denoised_chunk[0, 0, :original_chunk_shape[0], :original_chunk_shape[1]]  # Crop back to original size
+                denoised_chunk = model.run(None, {input_name: chunk_input})[0]
+                denoised_chunk = denoised_chunk[0, 0, :original_chunk_shape[0], :original_chunk_shape[1]]
             except Exception as e:
                 print(f"ONNX inference error for chunk at ({i}, {j}): {e}")
-                raise
+                continue
+
         else:
             # Prepare PyTorch input
             chunk_tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
             if not is_mono:
-                chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)  # Expand to 3 channels for RGB models
+                chunk_tensor = chunk_tensor.repeat(1, 3, 1, 1)
             else:
-                # For grayscale images, explicitly expand to 3 channels
                 chunk_tensor = chunk_tensor.expand(1, 3, chunk_tensor.shape[2], chunk_tensor.shape[3])
 
             # PyTorch inference
-            with torch.no_grad():
-                denoised_chunk = model(chunk_tensor).squeeze().cpu().numpy()[0]  # Use only the first output channel
+            try:
+                with torch.no_grad():
+                    if not DISABLE_MIXED_PRECISION and device.type == "cuda":
+                        with torch.cuda.amp.autocast():
+                            denoised_output = model(chunk_tensor).squeeze().cpu().numpy()
+                    else:
+                        denoised_output = model(chunk_tensor).squeeze().cpu().numpy()
 
-        denoised_chunks.append((denoised_chunk, i, j))
+                    if denoised_output.ndim == 3:
+                        denoised_chunk = denoised_output[0]  # Take first channel
+                    else:
+                        denoised_chunk = denoised_output
+
+            except Exception as e:
+                print(f"PyTorch inference error for chunk at ({i}, {j}): {e}")
+                continue
+
+        if denoised_chunk is not None:
+            denoised_chunks.append((denoised_chunk, i, j))
+        else:
+            print(f"⚠️ Warning: Denoised chunk at ({i}, {j}) is None — skipping")
 
         # Show progress update
         show_progress(idx + 1, len(chunks))
 
+    # Debug: final validation before stitching
+    if not all(isinstance(entry, tuple) and len(entry) == 3 for entry in denoised_chunks):
+        print("❗ Error: One or more denoised chunks are malformed before stitching!")
+
     # Stitch the chunks back together
-    
     denoised_channel = stitch_chunks_ignore_border(denoised_chunks, channel.shape, chunk_size=chunk_size, overlap=overlap)
-    
+
     return denoised_channel
 
 
 
 
+
 # Main process for denoising images
-def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance'):
+def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance', separate_channels=False):
     print((r"""
  *#        ___     __      ___       __                              #
  *#       / __/___/ /__   / _ | ___ / /________                      #
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V6.3 AI3                   # 
+ *#              Cosmic Clarity - Denoise V6.5 AI3.5c                # 
  *#                                                                  #
  *#                         SetiAstro                                #
- *#                    Copyright © 2024                              #
+ *#                    Copyright © 2025                              #
  *#                                                                  #
         """))
 
     if denoise_strength is None:
         # Prompt for user input
-        use_gpu, denoise_strength, denoise_mode = get_user_input()
+        use_gpu, denoise_strength, denoise_mode, separate_channels = get_user_input()
 
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -817,182 +983,210 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
     models = load_models(exe_dir, use_gpu)
 
     # Determine whether we're using ONNX or PyTorch
-    is_onnx = models["is_onnx"]
-    print(f"Using {'ONNX' if is_onnx else 'PyTorch'} model for inference.")
+    print(f"Using {'ONNX' if models['is_onnx'] else 'PyTorch'} models.")
 
     # Process each image in the input directory
-    for image_name in os.listdir(input_dir):
-        image_path = os.path.join(input_dir, image_name)
+    for fname in os.listdir(input_dir):
+        if not fname.lower().endswith(('.png', '.tif', '.tiff', '.fits', '.fit', '.xisf', '.jpg', '.jpeg')):
+            continue
+
+        # Unpack exactly what denoise_image returns
         denoised_image, original_header, bit_depth, file_extension, is_mono, file_meta, image_meta = denoise_image(
-            image_path, 
-            denoise_strength, 
-            models['device'], 
-            models["denoise_model"], 
-            denoise_mode=denoise_mode, 
-            is_onnx=is_onnx
+            os.path.join(input_dir, fname),
+            denoise_strength,
+            models,
+            denoise_mode,
+            separate_channels
         )
+        # Skip on error
+        if denoised_image is None:
+            continue
 
-        if denoised_image is not None:
-            output_image_name = os.path.splitext(image_name)[0] + "_denoised"
-            output_image_path = os.path.join(output_dir, output_image_name + file_extension)
-            actual_bit_depth = bit_depth  # Track actual bit depth for reporting
+        # Build output path
+        output_name = os.path.splitext(fname)[0] + "_denoised"
+        output_image_path = os.path.join(output_dir, output_name + file_extension)
 
-# Save as FITS file with header information if the original was FITS
-            if file_extension in ['.fits', '.fit']:
-                if original_header is not None:
-                    if is_mono:  # Grayscale FITS
-                        # Convert the grayscale image back to its original 2D format
-                        if bit_depth == "16-bit":
-                            denoised_image_fits = (denoised_image[:, :, 0] * 65535).astype(np.uint16)
-                        elif bit_depth == "32-bit unsigned":
-                            bzero = original_header.get('BZERO', 0)
-                            bscale = original_header.get('BSCALE', 1)
-                            denoised_image_fits = (denoised_image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
-                            original_header['BITPIX'] = 32
-                        else:  # 32-bit float
-                            denoised_image_fits = denoised_image[:, :, 0].astype(np.float32)
-                        
-                        # Update header for a 2D (grayscale) image
-                        original_header['NAXIS'] = 2
-                        original_header['NAXIS1'] = denoised_image.shape[1]  # Width
-                        original_header['NAXIS2'] = denoised_image.shape[0]  # Height
-                        if 'NAXIS3' in original_header:
-                            del original_header['NAXIS3']  # Remove if present
-
-                        hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
-                    
-                    else:  # RGB FITS
-                        # Transpose RGB image to FITS-compatible format (channels, height, width)
-                        denoised_image_transposed = np.transpose(denoised_image, (2, 0, 1))
-
-                        if bit_depth == "16-bit":
-                            denoised_image_fits = (denoised_image_transposed * 65535).astype(np.uint16)
-                        elif bit_depth == "32-bit unsigned":
-                            denoised_image_fits = denoised_image_transposed.astype(np.float32)
-                            original_header['BITPIX'] = -32
-                            actual_bit_depth = "32-bit unsigned"
-                        else:
-                            denoised_image_fits = denoised_image_transposed.astype(np.float32)
-                            actual_bit_depth = "32-bit float"
-
-                        # Update header for a 3D (RGB) image
-                        original_header['NAXIS'] = 3
-                        original_header['NAXIS1'] = denoised_image_transposed.shape[2]  # Width
-                        original_header['NAXIS2'] = denoised_image_transposed.shape[1]  # Height
-                        original_header['NAXIS3'] = denoised_image_transposed.shape[0]  # Channels
-                        
-                        hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
-
-                    # Write the FITS file
-                    hdu.writeto(output_image_path, overwrite=True)
-                    print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
-
-
-            # Save as TIFF based on the original bit depth if the original was TIFF
-            elif file_extension in ['.tif', '.tiff']:
-                if bit_depth == "16-bit":
-                    actual_bit_depth = "16-bit"
-                    if is_mono is True:  # Grayscale
-                        tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 65535).astype(np.uint16))
-                    else:  # RGB
-                        tiff.imwrite(output_image_path, (denoised_image * 65535).astype(np.uint16))
-                elif bit_depth == "8-bit":
-                    actual_bit_depth = "8-bit"
-                    if is_mono:
-                        tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 255.0).astype(np.uint8))
-                    else:
-                        tiff.imwrite(output_image_path, (denoised_image * 255.0).astype(np.uint8))                               
-                elif bit_depth == "32-bit unsigned":
-                    actual_bit_depth = "32-bit unsigned"
-                    if is_mono is True:  # Grayscale
-                        tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 4294967295).astype(np.uint32))
-                    else:  # RGB
-                        tiff.imwrite(output_image_path, (denoised_image * 4294967295).astype(np.uint32))           
-                else:
-                    actual_bit_depth = "32-bit float"
-                    if is_mono is True:  # Grayscale
-                        tiff.imwrite(output_image_path, denoised_image[:, :, 0].astype(np.float32))
-                    else:  # RGB
-                        tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
-
-                print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
-
-            elif file_extension == '.xisf':
-                try:
-                    # Debug: Print original image details
-                    print(f"Original image shape: {denoised_image.shape}, dtype: {denoised_image.dtype}")
-                    print(f"Bit depth: {bit_depth}")
-
-                    # Adjust bit depth
+        # Save as FITS file with header information if the original was FITS
+        if file_extension in ['.fits', '.fit']:
+            if original_header is not None:
+                if is_mono:  # Grayscale FITS
+                    # Convert the grayscale image back to its original 2D format
                     if bit_depth == "16-bit":
-                        processed_image = (denoised_image * 65535).astype(np.uint16)
-                    elif bit_depth == "8-bit":
-                        processed_image = (denoised_image * 255.0).astype(np.uint8)                        
+                        denoised_image_fits = (denoised_image[:, :, 0] * 65535).astype(np.uint16)
                     elif bit_depth == "32-bit unsigned":
-                        processed_image = (denoised_image * 4294967295).astype(np.uint32)
-                    else:  # Default to 32-bit float
-                        processed_image = denoised_image.astype(np.float32)
+                        bzero = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        denoised_image_fits = (denoised_image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+                        original_header['BITPIX'] = 32
+                    else:  # 32-bit float
+                        denoised_image_fits = denoised_image[:, :, 0].astype(np.float32)
+                    
+                    # Update header for a 2D (grayscale) image
+                    original_header['NAXIS'] = 2
+                    original_header['NAXIS1'] = denoised_image.shape[1]  # Width
+                    original_header['NAXIS2'] = denoised_image.shape[0]  # Height
+                    if 'NAXIS3' in original_header:
+                        del original_header['NAXIS3']  # Remove if present
 
-                    # Adjust for mono images
-                    if is_mono:
-                        print("Preparing mono image...")
-                        processed_image = processed_image[:, :, 0]  # Take the first channel
-                        processed_image = processed_image[:, :, np.newaxis]  # Add back channel dimension
-                        image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], 1)
-                        image_meta[0]['colorSpace'] = 'Gray'  # Update metadata for mono
+                    hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
+                
+                else:  # RGB FITS
+                    # Transpose RGB image to FITS-compatible format (channels, height, width)
+                    denoised_image_transposed = np.transpose(denoised_image, (2, 0, 1))
 
-                    # Debug: Print processed image details
-                    print(f"Processed image shape: {processed_image.shape}, dtype: {processed_image.dtype}")
+                    if bit_depth == "16-bit":
+                        denoised_image_fits = (denoised_image_transposed * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        denoised_image_fits = denoised_image_transposed.astype(np.float32)
+                        original_header['BITPIX'] = -32
+                        actual_bit_depth = "32-bit unsigned"
+                    else:
+                        denoised_image_fits = denoised_image_transposed.astype(np.float32)
+                        actual_bit_depth = "32-bit float"
 
-                    # Save the image
-                    XISF.write(
-                        output_image_path,                  # Correct output path
-                        processed_image,                   # Final processed image
-                        creator_app="Seti Astro Cosmic Clarity",
-                        image_metadata=image_meta[0],      # First block of image metadata
-                        xisf_metadata=file_meta,           # File-level metadata
+                    # Update header for a 3D (RGB) image
+                    original_header['NAXIS'] = 3
+                    original_header['NAXIS1'] = denoised_image_transposed.shape[2]  # Width
+                    original_header['NAXIS2'] = denoised_image_transposed.shape[1]  # Height
+                    original_header['NAXIS3'] = denoised_image_transposed.shape[0]  # Channels
+                    
+                    hdu = fits.PrimaryHDU(denoised_image_fits, header=original_header)
 
-                        shuffle=True
-                    )
-                    print(f"Saved {bit_depth} XISF denoised image to: {output_image_path}")
-
-                except Exception as e:
-                    print(f"Error saving XISF file: {e}")
-
-
-
-
-            # Save as 8-bit PNG if the original was PNG
-            else:
-                output_image_path = os.path.join(output_dir, output_image_name + ".png")
-                denoised_image_8bit = (denoised_image * 255).astype(np.uint8)
-                denoised_image_pil = Image.fromarray(denoised_image_8bit)
-                actual_bit_depth = "8-bit"
-                denoised_image_pil.save(output_image_path)
+                # Write the FITS file
+                hdu.writeto(output_image_path, overwrite=True)
                 print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
+
+
+        # Save as TIFF based on the original bit depth if the original was TIFF
+        elif file_extension in ['.tif', '.tiff']:
+            if bit_depth == "16-bit":
+                actual_bit_depth = "16-bit"
+                if is_mono is True:  # Grayscale
+                    tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 65535).astype(np.uint16))
+                else:  # RGB
+                    tiff.imwrite(output_image_path, (denoised_image * 65535).astype(np.uint16))
+            elif bit_depth == "8-bit":
+                actual_bit_depth = "8-bit"
+                if is_mono:
+                    tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 255.0).astype(np.uint8))
+                else:
+                    tiff.imwrite(output_image_path, (denoised_image * 255.0).astype(np.uint8))                               
+            elif bit_depth == "32-bit unsigned":
+                actual_bit_depth = "32-bit unsigned"
+                if is_mono is True:  # Grayscale
+                    tiff.imwrite(output_image_path, (denoised_image[:, :, 0] * 4294967295).astype(np.uint32))
+                else:  # RGB
+                    tiff.imwrite(output_image_path, (denoised_image * 4294967295).astype(np.uint32))           
+            else:
+                actual_bit_depth = "32-bit float"
+                if is_mono is True:  # Grayscale
+                    tiff.imwrite(output_image_path, denoised_image[:, :, 0].astype(np.float32))
+                else:  # RGB
+                    tiff.imwrite(output_image_path, denoised_image.astype(np.float32))
+
+            print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
+
+        elif file_extension == '.xisf':
+            try:
+                # Debug: Print original image details
+                print(f"Original image shape: {denoised_image.shape}, dtype: {denoised_image.dtype}")
+                print(f"Bit depth: {bit_depth}")
+
+                # Adjust bit depth
+                if bit_depth == "16-bit":
+                    processed_image = (denoised_image * 65535).astype(np.uint16)
+                elif bit_depth == "8-bit":
+                    processed_image = (denoised_image * 255.0).astype(np.uint8)                        
+                elif bit_depth == "32-bit unsigned":
+                    processed_image = (denoised_image * 4294967295).astype(np.uint32)
+                else:  # Default to 32-bit float
+                    processed_image = denoised_image.astype(np.float32)
+
+                # Adjust for mono images
+                if is_mono:
+                    print("Preparing mono image...")
+                    processed_image = processed_image[:, :, 0]  # Take the first channel
+                    processed_image = processed_image[:, :, np.newaxis]  # Add back channel dimension
+                    image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], 1)
+                    image_meta[0]['colorSpace'] = 'Gray'  # Update metadata for mono
+
+                # Debug: Print processed image details
+                print(f"Processed image shape: {processed_image.shape}, dtype: {processed_image.dtype}")
+
+                # Save the image
+                XISF.write(
+                    output_image_path,                  # Correct output path
+                    processed_image,                   # Final processed image
+                    creator_app="Seti Astro Cosmic Clarity",
+                    image_metadata=image_meta[0],      # First block of image metadata
+                    xisf_metadata=file_meta,           # File-level metadata
+
+                    shuffle=True
+                )
+                print(f"Saved {bit_depth} XISF denoised image to: {output_image_path}")
+
+            except Exception as e:
+                print(f"Error saving XISF file: {e}")
+
+
+
+
+        # Save as 8-bit PNG if the original was PNG
+        else:
+            output_image_path = os.path.join(output_dir, output_image_name + ".png")
+            denoised_image_8bit = (denoised_image * 255).astype(np.uint8)
+            denoised_image_pil = Image.fromarray(denoised_image_8bit)
+            actual_bit_depth = "8-bit"
+            denoised_image_pil.save(output_image_path)
+            print(f"Saved {actual_bit_depth} denoised image to: {output_image_path}")
 
 
 
 
 # Define input and output directories
-input_dir = os.path.join(exe_dir, 'input')
-output_dir = os.path.join(exe_dir, 'output')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cosmic Clarity Denoise Tool")
+    parser.add_argument(
+        '--denoise_strength',
+        type=float,
+        help="Denoise strength (0–1), overrides the GUI slider if provided"
+    )
+    parser.add_argument(
+        '--disable_gpu',
+        action='store_true',
+        help="Disable GPU acceleration and force CPU usage"
+    )
+    parser.add_argument(
+        '--denoise_mode',
+        choices=['luminance','full','separate'],
+        default='luminance',
+        help="Denoise mode: 'luminance', 'full' color model, or 'separate' per-channel"
+    )
+    parser.add_argument(
+        '--separate_channels',
+        action='store_true',
+        help="Alias for --denoise_mode separate"
+    )
+    
+    args = parser.parse_args()
 
-if not os.path.exists(input_dir):
-    os.makedirs(input_dir)
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+    # Ensure input/output folders exist
+    input_dir  = os.path.join(exe_dir, 'input')
+    output_dir = os.path.join(exe_dir, 'output')
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-# Add argument parsing for batch/script execution
-parser = argparse.ArgumentParser(description="Cosmic Clarity Denoise Tool")
-parser.add_argument('--denoise_strength', type=float, help="Denoise strength (0-1)")
-parser.add_argument('--disable_gpu', action='store_true', help="Disable GPU acceleration and use CPU only")
-parser.add_argument('--denoise_mode', type=str, choices=['luminance', 'full'], default='luminance', help="Denoise mode: luminance or full YCbCr denoising")
+    # If the user requested separate_channels, override denoise_mode
+    mode = args.denoise_mode
+    if args.separate_channels:
+        mode = 'separate'
 
-args = parser.parse_args()
-
-# Determine whether to use GPU based on command-line argument
-use_gpu = not args.disable_gpu
-
-# Pass arguments if provided, or fall back to defaults
-process_images(input_dir, output_dir, args.denoise_strength, use_gpu, args.denoise_mode)
+    # Launch processing
+    process_images(
+        input_dir,
+        output_dir,
+        denoise_strength=args.denoise_strength,
+        use_gpu=not args.disable_gpu,
+        denoise_mode=mode,
+        separate_channels=args.separate_channels
+    )
