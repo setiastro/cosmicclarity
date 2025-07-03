@@ -185,73 +185,80 @@ class SharpeningCNN(nn.Module):
         
         # Encoder (down-sampling path)
         self.encoder1 = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),  # 1st layer (3 -> 16 feature maps)
+            nn.Conv2d(3, 16, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(16),
+            # **new** extra block
+            ResidualBlock(16),
         )
         self.encoder2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # 2nd layer (16 -> 32 feature maps)
+            nn.Conv2d(16, 32, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(32),
+            ResidualBlock(32),       # extra
         )
         self.encoder3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, padding=2, dilation=2),  # 3rd layer (32 -> 64) with dilation
+            nn.Conv2d(32, 64, 3, padding=2, dilation=2),
             nn.ReLU(),
-            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(64),
+            ResidualBlock(64),
         )
         self.encoder4 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 4th layer (64 -> 128 feature maps)
+            nn.Conv2d(64, 128, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(128),
+            ResidualBlock(128),
         )
         self.encoder5 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2),  # 5th layer (128 -> 256) with dilation
+            nn.Conv2d(128, 256, 3, padding=2, dilation=2),
             nn.ReLU(),
-            ResidualBlock(256)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(256),
+            ResidualBlock(256),
         )
-        
-        # Decoder (up-sampling path with skip connections)
+
+        # and the decoder as before (you can also insert extras there if you like)…
         self.decoder5 = nn.Sequential(
-            nn.Conv2d(256 + 128, 128, kernel_size=3, padding=1),  # 256 + 128 feature maps from encoder4
+            nn.Conv2d(256+128, 128, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(128)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(128),
+            ResidualBlock(128),
         )
         self.decoder4 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),  # 128 + 64 feature maps from encoder3
+            nn.Conv2d(128+64, 64, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(64)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(64),
+            ResidualBlock(64),
         )
         self.decoder3 = nn.Sequential(
-            nn.Conv2d(64 + 32, 32, kernel_size=3, padding=1),  # 64 + 32 feature maps from encoder2
+            nn.Conv2d(64+32, 32, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(32)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(32),
+            ResidualBlock(32),
         )
         self.decoder2 = nn.Sequential(
-            nn.Conv2d(32 + 16, 16, kernel_size=3, padding=1),  # 32 + 16 feature maps from encoder1
+            nn.Conv2d(32+16, 16, 3, padding=1),
             nn.ReLU(),
-            ResidualBlock(16)  # Replaced Conv2d + ReLU with ResidualBlock
+            ResidualBlock(16),
+            ResidualBlock(16),
         )
         self.decoder1 = nn.Sequential(
-            nn.Conv2d(16, 3, kernel_size=3, padding=1),  # Output layer (16 -> 3 channels for RGB output)
-            nn.Sigmoid()  # Ensure output values are between 0 and 1
+            nn.Conv2d(16, 3, 3, padding=1),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
-        # Encoder
-        e1 = self.encoder1(x)  # First encoding block
-        e2 = self.encoder2(e1)  # Second encoding block
-        e3 = self.encoder3(e2)  # Third encoding block
-        e4 = self.encoder4(e3)  # Fourth encoding block
-        e5 = self.encoder5(e4)  # Fifth encoding block
-        
-        # Decoder with skip connections
-        d5 = self.decoder5(torch.cat([e5, e4], dim=1))  # Concatenate with encoder4 output
-        d4 = self.decoder4(torch.cat([d5, e3], dim=1))  # Concatenate with encoder3 output
-        d3 = self.decoder3(torch.cat([d4, e2], dim=1))  # Concatenate with encoder2 output
-        d2 = self.decoder2(torch.cat([d3, e1], dim=1))  # Concatenate with encoder1 output
-        d1 = self.decoder1(d2)  # Final output layer
+        e1 = self.encoder1(x)
+        e2 = self.encoder2(e1)
+        e3 = self.encoder3(e2)
+        e4 = self.encoder4(e3)
+        e5 = self.encoder5(e4)
 
-        return d1
+        d5 = self.decoder5(torch.cat([e5, e4], dim=1))
+        d4 = self.decoder4(torch.cat([d5, e3], dim=1))
+        d3 = self.decoder3(torch.cat([d4, e2], dim=1))
+        d2 = self.decoder2(torch.cat([d3, e1], dim=1))
+        return self.decoder1(d2)
+
 
 
 # Get the directory of the executable or the script location
@@ -573,7 +580,7 @@ class SatelliteToolDialog(QDialog):
     log_signal = pyqtSignal(str)
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.4 AI3")
+        self.setWindowTitle("Cosmic Clarity Satellite Removal Tool V2.4 AI3.5")
 
         self.setGeometry(100, 100, 400, 300)
 
