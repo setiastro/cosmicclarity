@@ -13,6 +13,7 @@ import platform
 import tifffile as tiff
 from astropy.io import fits
 from PIL import Image
+import cv2 
 
 import argparse  # For command-line argument parsing
 from PyQt6.QtWidgets import (
@@ -137,73 +138,58 @@ exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else 
 cached_models = None  # Cache to avoid reloading models unnecessarily
 
 def load_models(exe_dir, use_gpu=True):
+    """
+    Load ONLY the mono denoise model.
+    - Prefer PyTorch on MPS (macOS) when available and use_gpu=True.
+    - Otherwise use ONNX (CPUExecutionProvider) when use_gpu=True but MPS is unavailable.
+    - Otherwise fall back to PyTorch on CPU.
+    """
     global cached_models
     if cached_models:
         return cached_models
 
-    # 1) Decide whether to use PyTorch or ONNX
-    #    - Prefer PyTorch on MPS (macOS) if available
-    #    - Otherwise fall back to ONNX with CPU EP if no MPS GPU present and use_gpu=True
-    #    - Finally fall back to PyTorch on CPU
-    if torch.backends.mps.is_available() and use_gpu:
+    # Decide backend
+    try:
+        has_mps = torch.backends.mps.is_available()
+    except Exception:
+        has_mps = False
+
+    if has_mps and use_gpu:
         device = torch.device("mps")
         is_onnx = False
-
     elif use_gpu:
-        # On macOS there's no DML EP; try ONNX CPU EP
-        device = None
+        # use ONNX with CPU EP (macOS has no DML EP)
+        device = torch.device("cpu")  # not used by ONNX but kept for consistency
         is_onnx = True
-
     else:
         device = torch.device("cpu")
         is_onnx = False
 
     mono_model = None
-    color_model = None
 
     if not is_onnx:
-        # ── PyTorch path ────────────────────────────────────────────────────
-        # Mono model
-        mono = DenoiseCNN().to(device)
-        cp1 = torch.load(
-            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.pth"),
+        # ── PyTorch mono model ─────────────────────────────────────────────
+        mono_model = DenoiseCNN().to(device)
+        cp = torch.load(
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_6.pth"),
             map_location=device
         )
-        mono.load_state_dict(cp1.get("model_state_dict", cp1))
-        mono.eval()
-
-        # Color model
-        color = DenoiseCNN().to(device)
-        cp2 = torch.load(
-            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5c.pth"),
-            map_location=device
-        )
-        color.load_state_dict(cp2.get("model_state_dict", cp2))
-        color.eval()
-
-        mono_model, color_model = mono, color
-
+        mono_model.load_state_dict(cp.get("model_state_dict", cp))
+        mono_model.eval()
     else:
-        # ── ONNX path ───────────────────────────────────────────────────────
-        # Use CPUExecutionProvider on macOS
+        # ── ONNX mono model (CPUExecutionProvider) ─────────────────────────
         providers = ["CPUExecutionProvider"]
-
         mono_model = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5.onnx"),
-            providers=providers
-        )
-        color_model = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_denoise_cnn_AI3_5c.onnx"),
+            os.path.join(exe_dir, "deep_denoise_cnn_AI3_6.onnx"),
             providers=providers
         )
 
     cached_models = {
-        "device":      device,
-        "is_onnx":     is_onnx,
-        "mono_model":  mono_model,
-        "color_model": color_model
+        "device":     device,
+        "is_onnx":    is_onnx,
+        "mono_model": mono_model
     }
-    print(f"Loaded models → ONNX={is_onnx}, Device={device}")
+    print(f"Loaded mono model → ONNX={is_onnx}, Device={device}")
     return cached_models
 
 
@@ -264,6 +250,84 @@ def ycbcr_to_rgb(y_channel, cb_channel, cr_channel):
 
     return rgb_image
 
+def _guided_filter(guide: np.ndarray, src: np.ndarray, radius: int, eps: float) -> np.ndarray:
+    """
+    Fast guided filter using boxFilter (edge-preserving, very fast).
+    guide and src are HxW float32 in [0,1].
+    radius is the neighborhood radius; ksize=(2*radius+1).
+    eps is the regularization term.
+    """
+    r = max(1, int(radius))
+    ksize = (2*r + 1, 2*r + 1)
+
+    mean_I  = cv2.boxFilter(guide, ddepth=-1, ksize=ksize, borderType=cv2.BORDER_REFLECT)
+    mean_p  = cv2.boxFilter(src,   ddepth=-1, ksize=ksize, borderType=cv2.BORDER_REFLECT)
+    mean_Ip = cv2.boxFilter(guide * src, ddepth=-1, ksize=ksize, borderType=cv2.BORDER_REFLECT)
+    cov_Ip  = mean_Ip - mean_I * mean_p
+
+    mean_II = cv2.boxFilter(guide * guide, ddepth=-1, ksize=ksize, borderType=cv2.BORDER_REFLECT)
+    var_I   = mean_II - mean_I * mean_I
+
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+
+    mean_a = cv2.boxFilter(a, ddepth=-1, ksize=ksize, borderType=cv2.BORDER_REFLECT)
+    mean_b = cv2.boxFilter(b, ddepth=-1, ksize=ksize, borderType=cv2.BORDER_REFLECT)
+
+    q = mean_a * guide + mean_b
+    return q
+
+
+
+def denoise_chroma(cb: np.ndarray,
+                   cr: np.ndarray,
+                   strength: float,
+                   method: str = "guided",
+                   strength_scale: float = 2.0,
+                   guide_y: np.ndarray | None = None):
+    """
+    Fast chroma-only denoise for Cb/Cr in [0,1] float32.
+    method: 'guided' (default), 'gaussian', 'bilateral'
+    strength_scale: lets chroma smoothing go up to ~2× your slider.
+    guide_y: optional luminance guide (Y in [0,1]); required for 'guided' to be best.
+    """
+    eff = float(np.clip(strength * strength_scale, 0.0, 1.0))
+    if eff <= 0.0:
+        return cb, cr
+
+    cb = cb.astype(np.float32, copy=False)
+    cr = cr.astype(np.float32, copy=False)
+
+    if method == "guided":
+        # Need a guide; if not provided, fall back to Gaussian
+        if guide_y is not None:
+            # radius & eps scale with strength; tuned for strong chroma smoothing but edge-safe
+            radius = 2 + int(round(10 * eff))         # ~2..12  (ksize ~5..25)
+            eps    = (0.001 + 0.05 * eff) ** 2        # small regularization
+            cb_f   = _guided_filter(guide_y, cb, radius, eps)
+            cr_f   = _guided_filter(guide_y, cr, radius, eps)
+        else:
+            method = "gaussian"  # no guide provided → fast fallback
+
+    if method == "gaussian":
+        k     = 1 + 2 * int(round(8 * eff))           # 1,3,5,..,17
+        sigma = max(0.15, 2.4 * eff)
+        cb_f  = cv2.GaussianBlur(cb, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+        cr_f  = cv2.GaussianBlur(cr, (k, k), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+
+    if method == "bilateral":
+        # Bilateral is decent but slower than Gaussian; guided is preferred for speed/quality.
+        d      = 5 + 2 * int(round(6 * eff))          # 5..17
+        sigmaC = 25.0 * (0.5 + 3.0 * eff)             # ~12.5..100
+        sigmaS = 3.0  * (0.5 + 6.0 * eff)             # ~1.5..21
+        cb_f = cv2.bilateralFilter(cb, d=d, sigmaColor=sigmaC, sigmaSpace=sigmaS)
+        cr_f = cv2.bilateralFilter(cr, d=d, sigmaColor=sigmaC, sigmaSpace=sigmaS)
+
+    # Blend (maskless)
+    w = eff
+    cb_out = (1.0 - w) * cb + w * cb_f
+    cr_out = (1.0 - w) * cr + w * cr_f
+    return cb_out, cr_out
 
 # Function to split an image into chunks with overlap
 def split_image_into_chunks_with_overlap(image, chunk_size, overlap):
@@ -315,12 +379,12 @@ def blend_images(before, after, amount):
 class DenoiseUI(QDialog):
     def __init__(self):
         """
-        Creates the PyQt6 UI for selecting denoise options.
+        PyQt6 UI for selecting denoise options.
         """
         super().__init__()
 
         self.setWindowTitle("Cosmic Clarity Denoise Tool")
-        self.setFixedSize(300, 250)
+        self.setFixedSize(320, 360)
 
         layout = QVBoxLayout()
 
@@ -333,17 +397,31 @@ class DenoiseUI(QDialog):
         self.gpu_dropdown.setCurrentIndex(0)  # Default: Yes
         layout.addWidget(self.gpu_dropdown)
 
-        # Denoise Strength Slider
-        self.denoise_strength_label = QLabel("Denoise Strength (0-1):")
+        # Denoise Strength Slider (luminance / overall)
+        self.denoise_strength_label = QLabel("Denoise Strength (0-1): 0.90")
         layout.addWidget(self.denoise_strength_label)
 
         self.denoise_strength_slider = QSlider(Qt.Orientation.Horizontal)
         self.denoise_strength_slider.setMinimum(0)
         self.denoise_strength_slider.setMaximum(100)
-        self.denoise_strength_slider.setValue(90)  # Default: 0.9
+        self.denoise_strength_slider.setValue(90)  # Default: 0.90
         self.denoise_strength_slider.setTickInterval(1)
         self.denoise_strength_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.denoise_strength_slider.valueChanged.connect(self._update_denoise_strength_label)
         layout.addWidget(self.denoise_strength_slider)
+
+        # Color Denoise Strength Slider (for chroma)
+        self.color_denoise_strength_label = QLabel("Color Denoise Strength (0-1): 0.90")
+        layout.addWidget(self.color_denoise_strength_label)
+
+        self.color_denoise_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.color_denoise_strength_slider.setMinimum(0)
+        self.color_denoise_strength_slider.setMaximum(100)
+        self.color_denoise_strength_slider.setValue(90)  # Default matches main strength
+        self.color_denoise_strength_slider.setTickInterval(1)
+        self.color_denoise_strength_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.color_denoise_strength_slider.valueChanged.connect(self._update_color_denoise_strength_label)
+        layout.addWidget(self.color_denoise_strength_slider)
 
         # Denoise Mode Dropdown
         self.denoise_mode_label = QLabel("Denoise Mode:")
@@ -353,7 +431,7 @@ class DenoiseUI(QDialog):
         self.denoise_mode_dropdown.addItems(["full", "luminance"])
         layout.addWidget(self.denoise_mode_dropdown)
 
-        # 4) Separate‐channels checkbox (new)
+        # Separate-channels checkbox
         self.sep_check = QCheckBox("Process each RGB channel separately")
         self.sep_check.setChecked(False)
         layout.addWidget(self.sep_check)
@@ -365,13 +443,24 @@ class DenoiseUI(QDialog):
 
         self.setLayout(layout)
 
+    # --- label updaters ---
+    def _update_denoise_strength_label(self, *_):
+        v = self.denoise_strength_slider.value() / 100.0
+        self.denoise_strength_label.setText(f"Denoise Strength (0-1): {v:.2f}")
+
+    def _update_color_denoise_strength_label(self, *_):
+        v = self.color_denoise_strength_slider.value() / 100.0
+        self.color_denoise_strength_label.setText(f"Color Denoise Strength (0-1): {v:.2f}")
+
+    # --- results ---
     def get_user_selection(self):
-        result = self.exec()
-        use_gpu          = (self.gpu_dropdown.currentText() == "Yes")
-        denoise_strength = self.denoise_strength_slider.value() / 100.0
-        denoise_mode     = self.denoise_mode_dropdown.currentText().lower()
-        separate_channels= self.sep_check.isChecked()
-        return use_gpu, denoise_strength, denoise_mode, separate_channels
+        self.exec()
+        use_gpu                 = (self.gpu_dropdown.currentText() == "Yes")
+        denoise_strength        = self.denoise_strength_slider.value() / 100.0
+        color_denoise_strength  = self.color_denoise_strength_slider.value() / 100.0
+        denoise_mode            = self.denoise_mode_dropdown.currentText().lower()
+        separate_channels       = self.sep_check.isChecked()
+        return use_gpu, denoise_strength, color_denoise_strength, denoise_mode, separate_channels
 
 
 
@@ -379,8 +468,8 @@ class DenoiseUI(QDialog):
 def get_user_input():
     app = QApplication([])
     ui = DenoiseUI()
-    use_gpu, denoise_strength, denoise_mode, separate_channels = ui.get_user_selection()
-    return use_gpu, denoise_strength, denoise_mode, separate_channels
+    use_gpu, denoise_strength, color_denoise_strength, denoise_mode, separate_channels = ui.get_user_selection()
+    return use_gpu, denoise_strength, color_denoise_strength, denoise_mode, separate_channels
 
 # Function to show progress during chunk processing
 def show_progress(current, total):
@@ -525,7 +614,8 @@ def denoise_image(image_path: str,
                   denoise_strength: float,
                   models: dict,
                   denoise_mode: str = 'luminance',
-                  separate_channels: bool = False):
+                  separate_channels: bool = False,
+                  color_denoise_strength: float | None = None):
     """
     Denoises the input image using the specified model and mode.
 
@@ -543,7 +633,7 @@ def denoise_image(image_path: str,
     device      = models["device"]
     is_onnx     = models["is_onnx"]
     mono_model  = models["mono_model"]
-    color_model = models["color_model"]
+
 
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
@@ -775,9 +865,30 @@ def denoise_image(image_path: str,
                 y2 = blend_images(y, den_y, denoise_strength)
                 denoised_image = merge_luminance(y2, cb, cr)
 
-            else:  # 'full'
-                # full RGB network
-                denoised_image = denoise_full_rgb(stretched_image, models, denoise_strength)
+
+            else:
+                # --- FULL mode: L via NN (AI3_5), chroma via traditional denoise, then recombine ---
+                # Split to YCbCr
+                y, cb, cr = extract_luminance(stretched_image)
+
+                # Denoise L with mono NN
+                # Denoise L with mono NN
+                den_y = denoise_channel(
+                    y,
+                    models["device"],
+                    models["mono_model"],
+                    True, models["is_onnx"]
+                )
+                y2 = blend_images(y, den_y, denoise_strength)
+
+                colorstrength = color_denoise_strength if color_denoise_strength is not None else denoise_strength
+                cb2, cr2 = denoise_chroma(cb, cr,
+                                        strength=colorstrength,
+                                        method="guided",
+                                        guide_y=y)
+
+                # Recombine to RGB
+                denoised_image = merge_luminance(y2, cb2, cr2)
 
 
         # Unstretch the image
@@ -796,65 +907,7 @@ def denoise_image(image_path: str,
         print(f"Error reading image {image_path}: {e}")
         return None, None, None, None, None, None, None
     
-def denoise_full_rgb(image_rgb, models, denoise_strength):
-    """
-    image_rgb: H×W×3 float32 in [0,1]
-    models: dict from load_models()
-    """
-    device    = models["device"]
-    is_onnx   = models["is_onnx"]
-    session   = models["color_model"]
-    chunk_size, overlap = 256, 64
-    eps = 1e-8
 
-    # 1) Chop into overlapping chunks
-    chunks = split_image_into_chunks_with_overlap(image_rgb, chunk_size, overlap)
-    denoised_chunks = []
-
-    for idx, (chunk, i, j) in enumerate(chunks):
-        h, w, _ = chunk.shape
-
-        # 2) Compute per-channel min/max for THIS chunk: shape (1,1,3)
-        #pmin  = chunk.min(axis=(0,1), keepdims=True)
-        #pmax  = chunk.max(axis=(0,1), keepdims=True)
-        #denom = np.maximum(pmax - pmin, eps)
-
-        # 3) Normalize chunk per-channel
-        #norm = (chunk - pmin) / denom
-        norm = chunk
-
-        # 4) Run the model on the normalized chunk
-        if is_onnx:
-            inp = norm.transpose(2,0,1)[None].astype(np.float32)  # (1,3,H,W)
-            inp = np.pad(inp,
-                         ((0,0),(0,0),(0,chunk_size-h),(0,chunk_size-w)),
-                         mode="constant")
-            name = session.get_inputs()[0].name
-            out = session.run(None, {name: inp})[0]
-            out_norm = out[0, :, :h, :w].transpose(1,2,0)
-        else:
-            t = torch.from_numpy(norm).permute(2,0,1)[None].to(device)
-            with torch.no_grad():
-                if not DISABLE_MIXED_PRECISION and device.type=="cuda":
-                    with torch.cuda.amp.autocast():
-                        out_t = session(t)
-                else:
-                    out_t = session(t)
-            out_norm = out_t.squeeze(0).cpu().permute(1,2,0).numpy()
-
-        # 5) Blend in normalized space
-        blended_norm = blend_images(norm, out_norm, denoise_strength)
-
-        # 6) Un-normalize back to original chunk range
-        #blended = blended_norm * denom + pmin
-        blended = blended_norm
-
-        denoised_chunks.append((blended, i, j))
-        show_progress(idx+1, len(chunks))
-
-    # 7) Stitch all chunks back together
-    fused = stitch_chunks_ignore_border(denoised_chunks, image_rgb.shape, chunk_size, overlap)
-    return fused
 
 # Function to denoise a single channel
 def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
@@ -957,14 +1010,19 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
 
 
 # Main process for denoising images
-def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, denoise_mode='luminance', separate_channels=False):
+def process_images(input_dir, output_dir,
+                   denoise_strength=None,
+                   color_denoise_strength=None,
+                   use_gpu=True,
+                   denoise_mode='luminance',
+                   separate_channels=False):
     print((r"""
  *#        ___     __      ___       __                              #
  *#       / __/___/ /__   / _ | ___ / /________                      #
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Denoise V6.5 AI3.5c                # 
+ *#              Cosmic Clarity - Denoise V6.6   AI3.6               # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2025                              #
@@ -972,8 +1030,15 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
         """))
 
     if denoise_strength is None:
-        # Prompt for user input
-        use_gpu, denoise_strength, denoise_mode, separate_channels = get_user_input()
+        # GUI path
+        use_gpu, denoise_strength, denoise_mode, separate_channels, gui_color_strength = get_user_input()
+        # if caller didn't supply a color strength, take GUI's; otherwise keep caller's
+        if color_denoise_strength is None:
+            color_denoise_strength = gui_color_strength
+    else:
+        # headless path: if color strength not provided, match luminance strength
+        if color_denoise_strength is None:
+            color_denoise_strength = denoise_strength
 
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -996,7 +1061,8 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
             denoise_strength,
             models,
             denoise_mode,
-            separate_channels
+            separate_channels,
+            color_denoise_strength
         )
         # Skip on error
         if denoised_image is None:
@@ -1133,7 +1199,7 @@ def process_images(input_dir, output_dir, denoise_strength=None, use_gpu=True, d
 
         # Save as 8-bit PNG if the original was PNG
         else:
-            output_image_path = os.path.join(output_dir, output_image_name + ".png")
+            output_image_path = os.path.join(output_dir, output_name + ".png")
             denoised_image_8bit = (denoised_image * 255).astype(np.uint8)
             denoised_image_pil = Image.fromarray(denoised_image_8bit)
             actual_bit_depth = "8-bit"
@@ -1167,7 +1233,13 @@ if __name__ == "__main__":
         action='store_true',
         help="Alias for --denoise_mode separate"
     )
-    
+
+    parser.add_argument(
+        '--color_denoise_strength',
+        type=float,
+        help="Color (chroma) denoise strength (0–1). Defaults to --denoise_strength if omitted."
+    )
+
     args = parser.parse_args()
 
     # Ensure input/output folders exist
@@ -1186,6 +1258,7 @@ if __name__ == "__main__":
         input_dir,
         output_dir,
         denoise_strength=args.denoise_strength,
+        color_denoise_strength=args.color_denoise_strength,
         use_gpu=not args.disable_gpu,
         denoise_mode=mode,
         separate_channels=args.separate_channels
