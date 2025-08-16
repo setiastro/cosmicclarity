@@ -965,6 +965,7 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
 
 
 # Main process for denoising images
+# Main process for denoising images
 def process_images(input_dir, output_dir,
                    denoise_strength=None,
                    color_denoise_strength=None,
@@ -1034,13 +1035,16 @@ def process_images(input_dir, output_dir,
                     # Convert the grayscale image back to its original 2D format
                     if bit_depth == "16-bit":
                         denoised_image_fits = (denoised_image[:, :, 0] * 65535).astype(np.uint16)
+                        actual_bit_depth = "16-bit"
                     elif bit_depth == "32-bit unsigned":
                         bzero = original_header.get('BZERO', 0)
                         bscale = original_header.get('BSCALE', 1)
                         denoised_image_fits = (denoised_image[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
                         original_header['BITPIX'] = 32
+                        actual_bit_depth = "32-bit unsigned"
                     else:  # 32-bit float
                         denoised_image_fits = denoised_image[:, :, 0].astype(np.float32)
+                        actual_bit_depth = "32-bit"
                     
                     # Update header for a 2D (grayscale) image
                     original_header['NAXIS'] = 2
@@ -1054,9 +1058,10 @@ def process_images(input_dir, output_dir,
                 else:  # RGB FITS
                     # Transpose RGB image to FITS-compatible format (channels, height, width)
                     denoised_image_transposed = np.transpose(denoised_image, (2, 0, 1))
-
+                    actual_bit_depth=None
                     if bit_depth == "16-bit":
                         denoised_image_fits = (denoised_image_transposed * 65535).astype(np.uint16)
+                        actual_bit_depth = "16-bit"
                     elif bit_depth == "32-bit unsigned":
                         denoised_image_fits = denoised_image_transposed.astype(np.float32)
                         original_header['BITPIX'] = -32
