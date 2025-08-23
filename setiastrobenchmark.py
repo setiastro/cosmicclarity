@@ -2,14 +2,14 @@ import os
 import sys
 import time
 import json
-import platform
-import numpy as np
 import torch
 import requests
+import numpy as np
 import onnxruntime as ort
 from astropy.io import fits
 from numba import njit, jit, prange
 import psutil
+import platform
 import cpuinfo
 import multiprocessing
 from PyQt6.QtWidgets import (
@@ -35,7 +35,7 @@ with fits.open(BENCHMARK_IMAGE_PATH) as hdul:
 H, W = image.shape[1:]  # Image height and width
 PATCH_SIZE = 256  # CNN processes 256x256 patches
 
-# Function to Tile Image into 256x256 Chunks
+# ✅ Function to Tile Image into 256x256 Chunks
 def tile_image(image_array, patch_size=256):
     """Splits an image into 256x256 patches for batch processing."""
     c, h, w = image_array.shape  # (Channels, Height, Width)
@@ -56,7 +56,7 @@ GITHUB_REPO = "setiastrosuite"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # ⚠️ Store securely as an environment variable!
 JSON_FILE_PATH = "benchmark_results.json"
 
-# Fetch System Information
+# ✅ Fetch System Information
 def get_system_info():
     """Retrieve OS, CPU, GPU, RAM, and available acceleration backends."""
     system_info = {
@@ -68,6 +68,7 @@ def get_system_info():
         "ONNX Providers": ort.get_available_providers()
     }
 
+    # Get GPU details if CUDA is available
     if torch.cuda.is_available():
         system_info["GPU"] = torch.cuda.get_device_name(0)
 
@@ -82,6 +83,7 @@ def save_results_locally(results):
     """Save benchmark results locally."""
     filename = "benchmark_results.json"
 
+    # Load existing data if available
     if os.path.exists(filename):
         with open(filename, "r") as file:
             try:
@@ -91,12 +93,15 @@ def save_results_locally(results):
     else:
         all_results = []
 
+    # Append new results
     all_results.append(results)
 
+    # Save updated JSON
     with open(filename, "w") as file:
         json.dump(all_results, file, indent=4)
 
     print("✅ Results saved to", filename)
+
 
 # Define ResidualBlock for CNN
 class ResidualBlock(torch.nn.Module):
@@ -186,7 +191,7 @@ class SharpeningCNN(torch.nn.Module):
 
         return d1
 
-# Load Model
+# ✅ Load Model
 def load_model(exe_dir, use_gpu=True):
     """Load Stellar SharpeningCNN Model with CUDA, MPS, or CPU"""
     if USE_CUDA and use_gpu:
@@ -200,57 +205,77 @@ def load_model(exe_dir, use_gpu=True):
         print("Using CPU.")
 
     model = SharpeningCNN()
-    model_path = os.path.join(exe_dir, 'deep_sharp_stellar_cnn_AI3_5.pth')
+    model_path = os.path.join(exe_dir, 'deep_sharp_stellar_cnn_AI3_5s.pth')
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval().to(device)
 
     return model, device
 
-# GPU Benchmark (CUDA) with 256x256 Chunks & AMP
+
+
+# ✅ GPU Benchmark (CUDA) with 256x256 Chunks & AMP
 def gpu_benchmark(model, device, image_patches, progress_callback):
     """Run GPU Benchmark using CUDA or MPS (Metal Performance Shaders) with AMP"""
     image_patches = image_patches.to(device)
+
     total_time = 0
     with torch.no_grad():
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast():  # Enable Mixed Precision
             for i in range(len(image_patches)):
                 patch = image_patches[i:i+1]
                 start_time = time.time()
                 _ = model(patch)
+
                 if USE_CUDA:
                     torch.cuda.synchronize()
                 elif USE_MPS:
                     torch.mps.synchronize()
+
                 total_time += (time.time() - start_time) * 1000
                 progress_callback(f"GPU Benchmark: {i+1}/{len(image_patches)} patches...", clear=True)
+
     avg_time = total_time / len(image_patches)
     return avg_time, total_time
 
-# ONNX Benchmark (DirectML, CUDA, or CPU)
+
+
+
+# ✅ ONNX Benchmark (DirectML, CUDA, or CPU)
 def onnx_benchmark(image_patches, progress_callback):
     """Run ONNX Benchmark using DirectML, CUDA, or CPU with proper model loading."""
-    model_path = "deep_sharp_stellar_cnn_AI3_5.onnx"
+    model_path = "deep_sharp_stellar_cnn_AI3_5s.onnx"
     if not os.path.exists(model_path):
         return "ONNX Model Not Found"
+
     available_providers = ort.get_available_providers()
+
+    # Prioritize DirectML, then CUDA, then CPU
     if "DmlExecutionProvider" in available_providers:
         provider = "DmlExecutionProvider"
     elif "CUDAExecutionProvider" in available_providers:
         provider = "CUDAExecutionProvider"
     else:
         provider = "CPUExecutionProvider"
+
     print(f"Using ONNX Provider: {provider}")
+
+    # ✅ Load ONNX Model
     ort_session = ort.InferenceSession(model_path, providers=[provider])
     input_name = ort_session.get_inputs()[0].name
+
     total_time = 0
     for i in range(len(image_patches)):
-        patch = image_patches[i:i+1].numpy().astype(np.float32)
+        patch = image_patches[i:i+1].numpy().astype(np.float32)  # Convert patch to numpy
         start_time = time.time()
-        ort_session.run(None, {input_name: patch})
-        total_time += (time.time() - start_time) * 1000
+        ort_session.run(None, {input_name: patch})  # Run inference
+        total_time += (time.time() - start_time) * 1000  # Convert to ms
+
+        # ✅ Show Progress
         progress_callback(f"ONNX Benchmark: {i+1}/{len(image_patches)} patches...", clear=True)
+
     avg_time = total_time / len(image_patches)
     return avg_time, total_time
+
 
 @njit
 def mad_cpu_jit(image_array, median_val):
@@ -264,8 +289,8 @@ def mad_cpu(image_array, runs=3):
         start_time = time.time()
         median_val = np.median(image_array)
         _ = mad_cpu_jit(image_array, median_val)
-        times.append((time.time() - start_time) * 1000)
-    return times
+        times.append((time.time() - start_time) * 1000)  # Convert to ms
+    return times  # Return all timings (first includes JIT compile time)
 
 @njit(parallel=True)
 def flat_field_correction_jit(image_array, flat_frame, median_flat):
@@ -279,30 +304,35 @@ def flat_field_correction(image_array, flat_frame, runs=3):
         start_time = time.time()
         median_flat = np.median(flat_frame)
         _ = flat_field_correction_jit(image_array, flat_frame, median_flat)
-        times.append((time.time() - start_time) * 1000)
-    return times
+        times.append((time.time() - start_time) * 1000)  # Convert to ms
+    return times  # Return all timings
 
-# Resource path for bundled data
+# ✅ Benchmark GUI
 def resource_path(relative_path):
-    """Get the absolute path to a resource, works for dev and PyInstaller builds."""
+    """ Get the absolute path to a resource, works for dev and PyInstaller builds. """
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# BenchmarkWindow Class using PyQt6
 class BenchmarkWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Seti Astro Benchmark")
         self.setGeometry(100, 100, 500, 600)
+
+        # Main layout
         layout = QVBoxLayout(self)
 
         # Load and process image using Pillow
         image_path = resource_path("benchmark.png")
         original_image = Image.open(image_path)
         resized_image = original_image.resize((200, 200), Image.LANCZOS)
+
+        # Convert PIL image to QPixmap via QImage
         qimage = ImageQt(resized_image)
         pixmap = QPixmap.fromImage(qimage)
+
+        # Display the image in a QLabel
         self.logo_label = QLabel(self)
         self.logo_label.setPixmap(pixmap)
         self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -359,10 +389,12 @@ class BenchmarkWindow(QWidget):
         self.results = {}
 
     def run_benchmark(self):
+        # Reset progress and clear previous results
         self.progress.setValue(0)
         self.result_text.clear()
         results = {}
 
+        # Define a progress callback to update the UI
         def progress_callback(status, clear=False):
             if clear:
                 self.result_text.clear()
@@ -372,27 +404,38 @@ class BenchmarkWindow(QWidget):
         # Run CPU Benchmarks if selected
         if self.dropdown.currentText() in ["CPU", "Both"]:
             progress_callback("Running CPU Benchmarks...")
+            QApplication.processEvents
             start_time = time.time()
+
+            # Run MAD and Flat-Field Correction benchmarks (assumed external functions)
             cpu_times_mad = mad_cpu(image)
             cpu_times_flat = flat_field_correction(image, image)
+
             progress_callback("Completed CPU Benchmark.")
             results["CPU MAD (Single Core)"] = f"First: {cpu_times_mad[0]:.2f} ms | Avg: {np.mean(cpu_times_mad[1:]):.2f} ms"
             results["CPU Flat-Field (Multi-Core)"] = f"First: {cpu_times_flat[0]:.2f} ms | Avg: {np.mean(cpu_times_flat[1:]):.2f} ms"
-            QApplication.processEvents()
+            QApplication.processEvents
 
         # Run GPU Benchmarks if selected
         if self.dropdown.currentText() in ["GPU", "Both"]:
             progress_callback("Running CUDA Benchmarks...")
+
+            # Load model properly before running the benchmark
             model, device = load_model(os.getcwd(), use_gpu=True)
+
             avg_gpu_time, total_gpu_time = gpu_benchmark(model, device, image_tensor, progress_callback)
             progress_callback("Completed CUDA Benchmark.")
+
+            # Only run ONNX benchmark on Windows
             if platform.system() == "Windows":
                 avg_onnx_time, total_onnx_time = onnx_benchmark(image_tensor, progress_callback)
                 progress_callback("Completed ONNX Benchmark.", clear=True)
                 results["ONNX Time"] = f"Avg: {avg_onnx_time:.2f} ms | Total: {total_onnx_time:.2f} ms"
             else:
                 results["ONNX Time"] = "ONNX benchmark only available on Windows."
+
             results["GPU Time (CUDA)"] = f"Avg: {avg_gpu_time:.2f} ms | Total: {total_gpu_time:.2f} ms"
+
 
         # Collect System Info
         results["System Info"] = get_system_info()
@@ -402,11 +445,14 @@ class BenchmarkWindow(QWidget):
         self.result_text.append(final_results)
         self.result_text.verticalScrollBar().setValue(self.result_text.verticalScrollBar().maximum())
 
+        # Store Results for Saving/Uploading and enable the Save button
         self.results = results
         self.save_button.setEnabled(True)
+
         self.show_results_popup()
 
     def show_results_popup(self):
+        """Display a pop-up with the benchmark JSON and Copy/Submit buttons."""
         popup = QDialog(self)
         popup.setWindowTitle("Benchmark Results")
         layout = QVBoxLayout(popup)
@@ -415,6 +461,7 @@ class BenchmarkWindow(QWidget):
         label.setFont(QFont("Arial", 12))
         layout.addWidget(label)
 
+        # Convert results to JSON string
         json_string = json.dumps([self.results], indent=4)
         text_box = QTextEdit(popup)
         text_box.setReadOnly(True)
@@ -442,8 +489,11 @@ class BenchmarkWindow(QWidget):
         save_results_locally(self.results)
         self.result_text.append("\n✅ Results saved!\n")
 
+
 icon_file = resource_path("benchmark.ico")
 png_file = resource_path("benchmark.png")
+
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

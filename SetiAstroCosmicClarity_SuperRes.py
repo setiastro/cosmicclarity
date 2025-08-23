@@ -13,6 +13,12 @@ This script:
 """
 
 import os, sys, time, math, argparse, gzip
+if getattr(sys, 'frozen', False):
+    # We are in a PyInstaller bundle
+    # Adjust LD_LIBRARY_PATH so CUDA/cuDNN can be found
+    lib_dir = os.path.join(sys._MEIPASS, 'lib')
+    os.environ['LD_LIBRARY_PATH'] = lib_dir + os.pathsep + os.environ.get('LD_LIBRARY_PATH', '')
+
 from io import BytesIO
 import numpy as np
 import cv2
@@ -21,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tifffile as tiff
-import onnxruntime as ort
+
 # Additional dependencies for robust I/O
 import rawpy
 from astropy.io import fits
@@ -638,7 +644,6 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 ##########################################
 # 2. Stretch / Unstretch Functions
 ##########################################
-# Function to stretch an image
 def stretch_image(image):
     original_min = np.min(image)
     stretched_image = image - original_min
@@ -694,7 +699,6 @@ def unstretch_image(image, original_medians, original_min):
     image = np.clip(image, 0, 1)
 
     return image
-
 
 ##########################################
 # 3. Other Utility Functions
@@ -842,20 +846,7 @@ def load_superres_model(scale, model_dir):
         (model, device, use_pytorch) where use_pytorch is a bool.
     """
     import sys
-    if sys.platform.startswith("win"):
-        if torch.cuda.is_available():
-            print("Using device: CUDA (PyTorch)")
-            device = torch.device("cuda")
-            use_pytorch = True
-        elif "DmlExecutionProvider" in ort.get_available_providers():
-            print("Using DirectML for ONNX Runtime.")
-            device = "DirectML"
-            use_pytorch = False
-        else:
-            print("Using device: CPU (PyTorch)")
-            device = torch.device("cpu")
-            use_pytorch = True
-    elif sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux"):
         if torch.cuda.is_available():
             device = torch.device("cuda")
         else:
@@ -871,21 +862,14 @@ def load_superres_model(scale, model_dir):
         device = torch.device("cpu")
         use_pytorch = True
 
-    if use_pytorch:
-        model_filename = os.path.join(model_dir, f"superres_{scale}x.pth")
-        if not os.path.exists(model_filename):
-            raise ValueError(f"Model file not found: {model_filename}")
-        model = SuperResolutionCNN().to(device)
-        model.load_state_dict(torch.load(model_filename, map_location=device, weights_only=True))
-        model.eval()
-        return model, device, True
-    else:
-        # Using ONNX runtime with DirectML on Windows
-        model_filename = os.path.join(model_dir, f"superres_{scale}x.onnx")
-        if not os.path.exists(model_filename):
-            raise ValueError(f"ONNX model file not found: {model_filename}")
-        sess = ort.InferenceSession(model_filename, providers=["DmlExecutionProvider"])
-        return sess, None, False
+
+    model_filename = os.path.join(model_dir, f"superres_{scale}x.pth")
+    if not os.path.exists(model_filename):
+        raise ValueError(f"Model file not found: {model_filename}")
+    model = SuperResolutionCNN().to(device)
+    model.load_state_dict(torch.load(model_filename, map_location=device, weights_only=True))
+    model.eval()
+    return model, device, True
 
 
 # ---------------------------------------------

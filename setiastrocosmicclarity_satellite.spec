@@ -1,32 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+
 a = Analysis(
-    ['SetiAstroCosmicClarity_SuperRes.py'],
+    ['setiastrocosmicclarity_satellite.py'],
     pathex=[],
     binaries=[],
-    datas=[('upscale.png', '.'), ('upscale.ico', '.')],
+    datas=[('xisf.py', '.'),('satellite.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        'onnx', 
-        'onnxruntime', 
-        'onnxruntime_gpu', 
-        'onnxruntime_directml', 
-        'onnxruntime_training', 
-        'onnxconverter_common',
-        'onnx_tf',
-    ],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
-
-# EXCLUDE problematic system libraries explicitly
-excluded_libs = ['libzstd.so.1', 'libc.so.6']
-
-a.binaries = [x for x in a.binaries if x[0] not in excluded_libs]
-
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -34,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='setiastrocosmicclarity_superres',
+    name='setiastrocosmicclarity_satellite',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -45,9 +32,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['upscale.ico'],
+    icon=['satellite.png'],
 )
-
 coll = COLLECT(
     exe,
     a.binaries,
@@ -55,5 +41,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='SetiAstroCosmicClarity_SuperRes',
+    name='setiastrocosmicclarity_satellite',
 )

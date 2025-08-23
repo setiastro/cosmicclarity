@@ -965,7 +965,6 @@ def denoise_channel(channel, device, model, is_mono=False, is_onnx=False):
 
 
 # Main process for denoising images
-# Main process for denoising images
 def process_images(input_dir, output_dir,
                    denoise_strength=None,
                    color_denoise_strength=None,
