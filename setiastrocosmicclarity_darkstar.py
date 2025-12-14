@@ -14,6 +14,7 @@ import tifffile as tiff
 from astropy.io import fits
 import torch.nn.functional as F
 from PIL import Image
+import cv2
 
 import argparse  # For command-line argument parsing
 import time  # For simulating progress updates
@@ -830,46 +831,48 @@ def starremoval_image(image_path, starremoval_strength,
         def process_chunks(chunks, processed_shape):
             starless_chunks = []
             for idx, (chunk, i, j) in enumerate(chunks):
-                pmin, pmax = chunk.min(), chunk.max()
-                norm = (chunk - pmin) / (pmax - pmin + 1e-8)
-                h0, w0 = norm.shape[:2]
 
-                # pad for ONNX
-                if is_onnx and (h0!=chunk_size or w0!=chunk_size):
-                    pad = np.zeros((chunk_size,chunk_size,norm.shape[2]), dtype=norm.dtype)
-                    pad[:h0,:w0] = norm
+                # NO per-chunk min/max normalization – just make sure we’re float32
+                work = chunk.astype(np.float32, copy=False)
+                h0, w0 = work.shape[:2]
+
+                # pad for ONNX if needed (model expects fixed chunk_size×chunk_size)
+                if is_onnx and (h0 != chunk_size or w0 != chunk_size):
+                    pad = np.zeros((chunk_size, chunk_size, work.shape[2]), dtype=work.dtype)
+                    pad[:h0, :w0] = work
                     work = pad
-                else:
-                    work = norm
 
-                tensor = torch.from_numpy(work.astype(np.float32))
-                tensor = tensor.unsqueeze(0).permute(0,3,1,2)  # [1,C,H,W]
+                # [H,W,C] → [1,C,H,W]
+                tensor = torch.from_numpy(work)
+                tensor = tensor.unsqueeze(0).permute(0, 3, 1, 2)
 
                 if is_onnx:
                     inp_name = session.get_inputs()[0].name
                     out = session.run(None, {inp_name: tensor.cpu().numpy()})[0][0]
-                    res = out.transpose(1,2,0)
-                    if (h0,w0) != (chunk_size,chunk_size):
-                        res = res[:h0,:w0,:]
+                    res = out.transpose(1, 2, 0)
+                    if (h0, w0) != (chunk_size, chunk_size):
+                        res = res[:h0, :w0, :]
                 else:
                     tensor = tensor.to(device)
                     with torch.no_grad():
                         out_t = starremoval_model(tensor)
-                    res = out_t.squeeze(0).cpu().numpy().transpose(1,2,0)
+                    res = out_t.squeeze(0).cpu().numpy().transpose(1, 2, 0)
 
-                starless = res * (pmax - pmin + 1e-8) + pmin
+                # model already outputs [0,1] in the same scale as input
+                starless = res  # no re-scaling per tile
                 starless_chunks.append((starless, i, j))
 
                 if progress_callback:
                     progress_callback(
-                        f"Progress: {(idx+1)/len(chunks)*100:.2f}% "
-                        f"({idx+1}/{len(chunks)} chunks)"
+                        f"Progress: {(idx + 1) / len(chunks) * 100:.2f}% "
+                        f"({idx + 1}/{len(chunks)} chunks)"
                     )
 
             return stitch_chunks_ignore_border(
                 starless_chunks, processed_shape,
                 chunk_size, overlap, border_size=5
             )
+
 
         # ─── dispatch by image shape ────────────────────────────────────────
         if stretched_image.ndim == 2:
@@ -927,7 +930,7 @@ def process_images(input_dir, output_dir, starremoval_strength=None,
  *#      _\ \/ -_) _ _   / __ |(_-</ __/ __/ _ \                     #
  *#     /___/\__/\//_/  /_/ |_/___/\__/__/ \___/                     #
  *#                                                                  #
- *#              Cosmic Clarity - Dark Star V2.1c                    # 
+ *#              Cosmic Clarity - Dark Star V2.2c                    # 
  *#                                                                  #
  *#                         SetiAstro                                #
  *#                    Copyright © 2025                              #
