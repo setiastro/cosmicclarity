@@ -184,19 +184,19 @@ def load_models(exe_dir, use_gpu=True):
             providers=["DmlExecutionProvider"]
         )
         nonstellar_model_1 = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_1AI3_5.onnx"),
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_1AI3_5s.onnx"),
             providers=["DmlExecutionProvider"]
         )
         nonstellar_model_2 = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_2AI3_5.onnx"),
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_2AI3_5s.onnx"),
             providers=["DmlExecutionProvider"]
         )
         nonstellar_model_4 = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_4AI3_5.onnx"),
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_4AI3_5s.onnx"),
             providers=["DmlExecutionProvider"]
         )
         nonstellar_model_8 = ort.InferenceSession(
-            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_8AI3_5.onnx"),
+            os.path.join(exe_dir, "deep_nonstellar_sharp_cnn_radius_8AI3_5s.onnx"),
             providers=["DmlExecutionProvider"]
         )
 
@@ -673,19 +673,28 @@ def measure_psf_fwhm(plane: np.ndarray,
     Estimate PSF FWHM in a float‐image plane via SEP.
     Returns the median FWHM of all detected sources, or default_fwhm if none.
     """
-    data = plane.astype(np.float32)
-    bkg = sep.Background(data)                   # subtract background
-    data_sub = data - bkg.back()
-    objects = sep.extract(data_sub, thresh, err=bkg.rms())
-    fwhms = []
-    for obj in objects:
-        if obj['npix'] < min_area:
-            continue
-        # semi‐major 'a' & semi‐minor 'b' give Gaussian sigma
-        sigma = np.sqrt(obj['a'] * obj['b'])
-        fwhm = sigma * 2.0 * np.sqrt(2.0 * np.log(2.0))
-        fwhms.append(fwhm)
-    return float(np.median(fwhms)*0.5) if fwhms else default_fwhm
+    try:
+        data = plane.astype(np.float32)
+        # if the tile is too small for SEP's default 64×64 mesh,
+        # Background(data) may yield an empty map -> error later.
+        bkg      = sep.Background(data)
+        data_sub = data - bkg.back()
+        rms_map  = bkg.rms()
+        if rms_map.size == 0:
+            raise ValueError("empty RMS map")
+        objects = sep.extract(data_sub, thresh, err=rms_map)
+        fwhms = []
+        for obj in objects:
+            if obj['npix'] < min_area:
+                continue
+            sigma = np.sqrt(obj['a'] * obj['b'])
+            fwhm  = sigma * 2.0 * np.sqrt(2.0 * np.log(2.0))
+            fwhms.append(fwhm)
+        return float(np.median(fwhms)*0.5) if fwhms else default_fwhm
+    except Exception as e:
+        # either no stars, or SEP failed on a small tile
+        print(f"⚠️ PSF measurement failed ({e}); using default {default_fwhm}")
+        return default_fwhm
 
 # Function to sharpen image
 def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amount, nonstellar_amount, device, models, sharpen_channels_separately, auto_detect_psf):
@@ -973,18 +982,29 @@ def sharpen_image(image_path, sharpening_mode, nonstellar_strength, stellar_amou
             for idx, (chunk, i, j, is_edge) in enumerate(chunks):
                 # decide strength
                 if auto_detect_psf:
-                    fwhm = measure_psf_fwhm(chunk)  # use SEP to get median FWHM, or None
-                    if fwhm is not None:
-                        radius = float(np.clip(fwhm, 1, 8))
-                    else:
-                        radius = nonstellar_strength
+                    fwhm = measure_psf_fwhm(chunk)
+                    radius = float(np.clip(fwhm, 1, 8))
                 else:
-                    radius = nonstellar_strength
+                    radius = float(nonstellar_strength)
 
-                # find lower/higher radii for interpolation
-                choices = np.array([1, 2, 4, 8], float)
-                lo = choices[choices <= radius].max()
-                hi = choices[choices >= radius].min()
+                # Clamp into your supported discrete set before you pick lo/hi
+                # your discrete radii
+                choices = np.array([1, 2, 4, 8], dtype=float)
+
+                # (1) clamp radius into [1,8]
+                radius = float(np.clip(radius, choices[0], choices[-1]))
+
+                # (2) find the insert index
+                choice_idx = np.searchsorted(choices, radius, side="left")
+
+                # (3) pick lo/hi without ever reducing an empty array
+                if choice_idx == 0:
+                    lo = hi = choices[0]
+                elif choice_idx >= len(choices):
+                    lo = hi = choices[-1]
+                else:
+                    # radius is between choices[choice_idx-1] and choices[choice_idx]
+                    lo, hi = choices[choice_idx-1], choices[choice_idx]
 
                 if lo == hi:
                     sharpened_chunk = infer_chunk(model_map[int(lo)], chunk)

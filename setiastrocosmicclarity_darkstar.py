@@ -367,7 +367,7 @@ class ProcessingThread(QThread):
 class StarRemovalUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Cosmic Clarity - Dark Star V2.1c")
+        self.setWindowTitle("Cosmic Clarity - Dark Star V2.2c")
         self.setMinimumSize(400, 300)
         self.use_gpu = True
         self.star_removal_mode = "unscreen"
