@@ -592,7 +592,7 @@ def denoise_image(image_path: str,
 
     # Get file extension
     file_extension = os.path.splitext(image_path)[1].lower()
-    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', 'jpg', 'jpeg']:
+    if file_extension not in ['.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.jpg', '.jpeg']:
         print(f"Ignoring non-image file: {image_path}")
         return None, None, None, None, None, None, None
 
